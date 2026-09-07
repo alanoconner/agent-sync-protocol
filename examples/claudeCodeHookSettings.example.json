@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AGENT_SYNC_SERVER=ws://localhost:4600 /absolute/path/to/agent-sync-protocol/node_modules/.bin/tsx /absolute/path/to/agent-sync-protocol/examples/claudeCodeHook.ts pre"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AGENT_SYNC_SERVER=ws://localhost:4600 /absolute/path/to/agent-sync-protocol/node_modules/.bin/tsx /absolute/path/to/agent-sync-protocol/examples/claudeCodeHook.ts post"
+          }
+        ]
+      }
+    ]
+  }
+}

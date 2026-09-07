@@ -1,0 +1,17 @@
+# Example .agent-sync-mcp-map.yml — see agent-sync-dev-spec.md Section 3.2.
+# Supporting a new upstream MCP server is adding entries here, not new code.
+mappings:
+  - tool: "write_file"
+    op: write
+    path_param: "path"
+    content_param: "content"
+    mode: full_replace
+  - tool: "str_replace_based_edit_tool"
+    op: write
+    path_param: "path"
+    content_param: "new_str"
+    mode: range_replace
+    range_params: ["old_str"]
+  - tool: "read_file"
+    op: read
+    path_param: "path"

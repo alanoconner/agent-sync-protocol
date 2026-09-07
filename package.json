@@ -1,0 +1,37 @@
+{
+  "name": "agent-sync-protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "agent-sync": "dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "vitest run",
+    "server": "tsx src/server/index.ts",
+    "cli": "tsx src/cli/index.ts",
+    "demo": "tsx examples/demoClient.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "diff": "^9.0.0",
+    "fuse-native": "^2.2.6",
+    "js-yaml": "^5.4.1",
+    "lib0": "^0.2.94",
+    "simple-git": "^3.36.0",
+    "ws": "^8.18.0",
+    "y-protocols": "^1.0.6",
+    "yjs": "^13.6.20",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/diff": "^7.0.2",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
