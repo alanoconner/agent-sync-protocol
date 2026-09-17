@@ -32,7 +32,7 @@
 // AGENT_SYNC_EXCLUSIVE_PATHS (optional comma-separated relative paths that
 // go through the lock service instead of pure CRDT merge, Phase 6).
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { SyncFileOps } from "../src/sync/syncFileOps.js";
@@ -41,7 +41,7 @@ interface HookInput {
   session_id?: string;
   cwd?: string;
   tool_name?: string;
-  tool_input?: { file_path?: string };
+  tool_input?: { file_path?: string; command?: string };
 }
 
 const SNAPSHOT_DIR = join(tmpdir(), "agent-sync-hook-snapshots");
@@ -122,16 +122,82 @@ async function runPost(ops: SyncFileOps, docName: string, filePath: string): Pro
   }
 }
 
+/**
+ * Best-effort file-path extraction for a `Bash` tool call — not a real shell
+ * parser. `Read`/`Edit`/`Write` name their target file directly; `Bash` only
+ * gives a free-text command string, so anything it touches (`sed -i`, a
+ * Python script that opens a path, `cp a b`) would otherwise bypass this
+ * bridge entirely — confirmed live: an agent blocked twice by a genuine
+ * RangeMismatchError fell back to editing via a Python script through Bash,
+ * and that write never reached the CRDT doc at all. This narrows the gap for
+ * the common cases (a literal, already-existing or extension-bearing path
+ * token in the command) without pretending to close it — it cannot see a
+ * path built from a variable, a glob, command substitution, or a heredoc.
+ * The real fix for full coverage is FUSE/kernel-level interception, which
+ * sees the actual syscalls regardless of what process issued them.
+ */
+function extractCandidatePaths(workspaceRoot: string, command: string): string[] {
+  const tokens = command.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+  const candidates = new Set<string>();
+  for (const raw of tokens) {
+    const token = raw.replace(/^["']|["']$/g, "");
+    if (!token || token.startsWith("-")) continue;
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(token)) continue; // URL
+    if (/[*?$`]/.test(token)) continue; // glob, variable, command substitution — can't resolve statically
+    const abs = isAbsolute(token) ? token : join(workspaceRoot, token);
+    let isFile: boolean;
+    try {
+      isFile = lstatSync(abs).isFile();
+    } catch {
+      isFile = /\.[a-zA-Z0-9]{1,10}$/.test(token); // doesn't exist yet — plausible new file if it looks like one
+    }
+    if (!isFile) continue;
+    const docName = toDocName(workspaceRoot, abs);
+    if (docName !== null) candidates.add(docName);
+  }
+  return [...candidates];
+}
+
+async function runPreBash(ops: SyncFileOps, workspaceRoot: string, command: string): Promise<void> {
+  for (const docName of extractCandidatePaths(workspaceRoot, command)) {
+    await runPre(ops, docName, join(workspaceRoot, docName));
+  }
+}
+
+async function runPostBash(ops: SyncFileOps, workspaceRoot: string, command: string): Promise<void> {
+  for (const docName of extractCandidatePaths(workspaceRoot, command)) {
+    const filePath = join(workspaceRoot, docName);
+    if (!existsSync(filePath)) continue; // deleted or never created by the command — nothing to push
+    await runPost(ops, docName, filePath);
+  }
+}
+
 async function main(): Promise<void> {
   const mode = process.argv[2];
   const raw = readFileSync(0, "utf8");
   const input = (raw.trim() ? JSON.parse(raw) : {}) as HookInput;
+  const workspaceRoot = process.env.CLAUDE_PROJECT_DIR ?? input.cwd ?? process.cwd();
+
+  if (input.tool_name === "Bash") {
+    const command = input.tool_input?.command;
+    if (typeof command !== "string") return;
+    const ops = makeOps(input.session_id ?? workspaceRoot);
+    try {
+      if (mode === "pre") {
+        await runPreBash(ops, workspaceRoot, command);
+      } else if (mode === "post") {
+        await runPostBash(ops, workspaceRoot, command);
+      }
+    } finally {
+      await ops.close();
+    }
+    return;
+  }
 
   if (input.tool_name !== "Read" && input.tool_name !== "Edit" && input.tool_name !== "Write") return;
   const filePath = input.tool_input?.file_path;
   if (typeof filePath !== "string") return;
 
-  const workspaceRoot = process.env.CLAUDE_PROJECT_DIR ?? input.cwd ?? process.cwd();
   const docName = toDocName(workspaceRoot, filePath);
   if (docName === null) return;
 

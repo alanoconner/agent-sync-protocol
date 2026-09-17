@@ -36,10 +36,11 @@ Different agents reach the filesystem through genuinely different paths, and eac
 |---|---|---|---|
 | Custom/framework agents that expose file ops as MCP tools | MCP tool calls | Generic MCP proxy | 3.2 |
 | Frameworks with a clean tool-registration API (LangChain-style `Tool(name=..., func=...)`) | In-process function call bound to a tool name | Direct rebinding of the registered function | 3.3 |
-| **CLI coding agents with built-in native file tools — Claude Code, Codex, and similar** | Compiled-in tool calls straight OS filesystem syscalls (`fs.writeFile`, etc.) — **no MCP, no rebindable registry** | **Virtual filesystem (FUSE / WinFsp)** — see 3.3a | 3.3a |
+| **CLI coding agents with a pre/post-tool hook API — Claude Code (`PreToolUse`/`PostToolUse`), Codex (`PreToolUse`/`PostToolUse` on `apply_patch`), and others that expose an equivalent** | Compiled-in tool calls straight to OS filesystem syscalls, but the CLI itself fires a hook immediately before/after the call | **Hook-based sync — sync disk to latest merged state before the tool runs, push the resulting edit after** | 3.3b |
+| CLI coding agents with **no** hook API and no rebindable registry | Compiled-in tool calls straight to OS filesystem syscalls, no interception point exposed at all | Virtual filesystem (FUSE / WinFsp) | 3.3a |
 | Frameworks with hardcoded file tools and no plugin hook, not covered above | Varies | Monkey-patch as last resort | 3.3 |
 
-Audit which category each target agent falls into before assuming the MCP proxy or tool-registration approach applies — for CLI coding agents specifically, it does not, and 3.3a is the actual primary mechanism, not a fallback.
+Audit which category each target agent falls into before assuming the MCP proxy or tool-registration approach applies. For CLI coding agents specifically: check for a hook API first (3.3b) — it's zero-install, avoids the directory-navigation gap FUSE currently has (3.3a), and for agents like Claude Code whose built-in Edit tool does its own content matching, it improves correctness of that matching almost for free (see 3.3b). Reach for FUSE (3.3a) only when no hook mechanism exists for that agent.
 
 ### 3.1 How rebinding works (for categories where a registry exists)
 
@@ -105,27 +106,61 @@ Ship a small built-in library of mapping presets for common cases (a generic fil
 2. **Frameworks with a plugin/middleware hook** that runs before a built-in file tool executes — hook in there if direct rebinding isn't exposed.
 3. **Last resort, no hook of any kind** — monkey-patch the framework's file I/O module at the process level. Brittle across framework versions; avoid unless 1–2 are unavailable and 3.3a doesn't apply.
 
-### 3.3a Virtual filesystem (FUSE / WinFsp) — primary mechanism for CLI coding agents
+### 3.3a Virtual filesystem (FUSE / WinFsp) — mechanism for CLI agents with no hook API
 
-**This is not a fallback for this category — it's the only mechanism that works.** Claude Code, Codex, and similar CLI coding agents ship with built-in file tools compiled directly into the binary, calling OS filesystem syscalls (`fs.writeFile`, `fs.readFile`) straight through. There is no tool registry to rebind and no MCP layer in the path for their native file operations — 3.1, 3.2, and 3.3 all assume a registry or protocol boundary that simply doesn't exist here.
+Use this only when a target CLI coding agent exposes neither a rebindable tool registry (3.1) nor a pre/post-tool hook mechanism (3.3b). Prefer 3.3b wherever it's available — it's zero-install and avoids the directory-navigation gap noted below.
 
-**How it works:** mount a virtual filesystem (FUSE on Linux/macOS, WinFsp on Windows) at the path the agent treats as its working directory. When the agent's built-in `Write`/`Read` tool executes its normal syscall, that syscall resolves against the virtual mount instead of a real directory. The FUSE/WinFsp driver is what actually talks to the sync server on the other end — the agent's binary does exactly what it always does; only where "the filesystem" physically resolves has changed.
+**How it works:** mount a virtual filesystem (FUSE on Linux/macOS, WinFsp on Windows) at the path the agent treats as its working directory. When the agent's built-in file tool executes its normal syscall, that syscall resolves against the virtual mount instead of a real directory. The FUSE/WinFsp driver is what actually talks to the sync server on the other end — the agent's binary does exactly what it always does; only where "the filesystem" physically resolves has changed.
 
 ```
-Claude Code's built-in Write tool → fs.writeFile() syscall → FUSE/WinFsp mount → sync server
-                                                              (agent has zero awareness of this)
+Agent's built-in Write tool → fs.writeFile() syscall → FUSE/WinFsp mount → sync server
+                                                        (agent has zero awareness of this)
 ```
 
 **Implementation notes:**
 - Reads (`open`/`read` syscalls against the mount) should return current CRDT-merged content, same principle as Section 3.1's read-path swap.
 - Writes (`write`/`close` syscalls) should be translated into `editFile` calls against the sync server, going through the same `range_replace`-vs-`full_replace` and match-or-reject logic as Section 3.2, since the underlying semantics (does this edit still apply to current content) don't change based on which interception mechanism delivered it.
 - Error responses need to come back as real POSIX/Windows filesystem error codes (`EBUSY`, `EAGAIN`, etc.) at the syscall level — Section 3.6's message-embedding approach still applies, since these agents read tool-call error output the same way any agent does.
-- This needs one implementation per OS (libfuse on Linux, macFUSE on macOS, WinFsp on Windows) — unlike 3.1–3.3, this is real OS-specific engineering work, not a config/wiring change. Budget for it accordingly; do not treat it as equivalent effort to the MCP proxy.
-4. **Last resort** — monkey-patch the framework's file I/O module at the process level. Brittle across framework versions; avoid unless 1–3 are unavailable.
+- This needs one implementation per OS (libfuse on Linux, macFUSE on macOS, WinFsp on Windows) — unlike 3.1–3.3, this is real OS-specific engineering work, not a config/wiring change. Budget for it accordingly; do not treat it as equivalent effort to the MCP proxy or the hook mechanism.
+
+**Known current limitations (do not treat this path as production-ready until resolved):**
+- **Requires a real system-security change from the end user** — on macOS, macFUSE needs its kernel extension enabled via System Settings, which this codebase deliberately does not (and should not) do on the user's behalf, and may require a reboot. This is real installation friction, not a config step — weigh it against 3.3b for any agent where a hook alternative exists.
+- **Directory operations are commonly the last syscalls implemented, and their absence blocks real usage.** A driver that only implements `open`/`read`/`write`/`truncate`/`flush`/`release`/`unlink` — enough to prove per-file merge semantics in tests — has no `readdir`/`mkdir`/`rename`. Without those, `ls`, `Glob`, and any directory browsing on the mount fail, which blocks real multi-file project navigation even though single-file read/write already works. Treat directory-op support as a hard requirement before this path is usable on an actual project, not a later polish item.
+
+### 3.3b Pre/post-tool hooks — mechanism for CLI agents that expose one (Claude Code, Codex, and similar)
+
+**Recommended default for Claude Code and any CLI agent with an equivalent hook API**, ahead of FUSE (3.3a) — no system install, no kernel extension, no reboot, and it sidesteps the directory-navigation gap in 3.3a entirely, since real disk stays real disk for everything except the one file actively being edited.
+
+**How it works, using Claude Code's `PreToolUse`/`PostToolUse` hooks as the concrete example:**
+- **`PreToolUse`** (on Edit/Write, and ideally Read): before the built-in tool runs, pull the current merged content from the sync server and write it to the real file on disk. The built-in tool then executes against genuinely current content.
+- **`PostToolUse`**: read the resulting disk content, diff it against the pre-image the hook just wrote (this diff is precisely this agent's edit, since nothing else should write to that file in the gap between the two hooks), convert the diff to a CRDT operation, and send it to the sync server.
+
+```
+Claude Code Edit tool call
+   → PreToolUse hook: pull merged state from sync server, write to disk
+   → Edit tool runs normally against disk (old_str match now checked against current content)
+   → PostToolUse hook: diff pre/post disk state, send as CRDT op to sync server
+```
+
+**Why this is not just a stopgap for 3.3a's current gaps — it's arguably the better long-term mechanism for this category:**
+- Directory operations (`ls`, `Glob`) need no special handling at all, since the filesystem is never virtualized — only the one file being actively edited needs syncing, right before and after the tool call that touches it.
+- Claude Code's built-in Edit tool does its own `old_str`-style content matching against whatever's on disk at call time. Because the `PreToolUse` hook guarantees disk reflects the latest merged state immediately before that match happens, this mechanism achieves the exact-match-or-reject correctness goal from Section 3.2's `range_replace` rule largely for free, rather than needing a custom match implementation.
+- Fully consistent with the "agent needs zero instructions, zero awareness" principle (Section 2) — Claude Code keeps calling Edit/Write/Read exactly as it always has.
+
+**Implementation notes:**
+- This is per-CLI-agent config (a hook script registered with that agent's hook system), not a generic mechanism — verify against each target agent's current hook documentation before assuming coverage; fall back to 3.3a only for agents that expose neither a hook API nor a registry.
+- The pre/post diff needs to become a real CRDT operation (insert/delete), not a full-file overwrite sent to the sync server — a full overwrite would discard the operation-level granularity CRDT merge depends on.
+- Error handling: if the sync server rejects the resulting operation (lock denial, validation failure), the `PostToolUse` hook has already let the built-in tool "succeed" against local disk — the rejection has to be surfaced back to the agent through a subsequent tool call's error (e.g. the next `PreToolUse` pull fails, or a following action on that file returns the rejection) rather than being invisible. Design this failure path explicitly rather than assuming it falls out naturally from the hook sequence.
+
+**Codex (confirmed, current as of Codex's published hooks reference — verify against the running version before implementation):**
+- Codex's file-edit tool is `apply_patch`, and it's covered by both `PreToolUse` and `PostToolUse` (matchable as `apply_patch`, `Edit`, or `Write`). Same pre-sync-then-diff pattern applies: `PreToolUse` refreshes disk to the latest merged state before `apply_patch` runs; `PostToolUse` diffs the result and sends it to the sync server.
+- **Codex's `PreToolUse` supports outright denial** (`permissionDecision: "deny"` with a reason), which is stronger than Claude Code's pattern as described above — instead of only refreshing disk and relying on `apply_patch`'s own patch-context matching to fail on a stale edit, the hook can proactively check the sync server and block the call before it touches disk at all when a real conflict exists.
+- `apply_patch` operates on unified-diff-style patch text rather than Claude Code's `old_str`/`new_str` replace — its own patch-context matching plays the same role as the `range_replace` exact-match rule in Section 3.2 once disk is pre-synced to current state, so this still doesn't need a custom match implementation.
+- **Real gap, not yet resolved: Codex's documented tool-coverage table does not list a hook path for plain file reads** — only `Bash`, `apply_patch`, MCP tools, and a small set of other named local function tools are covered. This means the "pre-sync disk before a read" half of the pattern (Section 3.1's read-path swap) may not be achievable for Codex the way it is for agents with a rebindable registry or an MCP proxy in front of them. Confirm directly against a running Codex instance before assuming read freshness is guaranteed; if it isn't, Codex agents may act on disk content that's stale relative to what's already merged elsewhere until the next flush.
 
 ### 3.4 Reference integration
 
-Ship the generic MCP proxy (3.2) and the virtual-filesystem driver (3.3a) as the two primary reference integrations — the first covers custom/framework agents, the second covers CLI coding agents like Claude Code and Codex, which are likely priority targets. Add one non-MCP tool-registration example (3.3, tier 1) so the wiring pattern is copy-pasteable for frameworks that don't speak MCP either.
+Ship the generic MCP proxy (3.2) and the hook-based driver (3.3b) as the two primary reference integrations — the first covers custom/framework agents, the second covers CLI coding agents like Claude Code and Codex, which are likely priority targets and are both confirmed to expose a usable hook API. Add one non-MCP tool-registration example (3.3, tier 1) so the wiring pattern is copy-pasteable for frameworks that don't speak MCP either. Treat 3.3a (FUSE/WinFsp) as needed only if a target CLI agent turns out to expose neither a hook API nor a registry.
 
 ### 3.5 Error shape preservation
 
@@ -296,7 +331,7 @@ State this section's contents plainly in any product documentation or README —
 
 **Phase 2 — Multi-file + presence awareness.** Arbitrary file paths, awareness channel, client reconnect/backoff.
 
-**Phase 3 — Transparent tool interception + one real agent integration (Section 3).** Build and validate at least one MCP-based integration (3.2) and, separately, the FUSE/WinFsp driver (3.3a) if CLI coding agents like Claude Code or Codex are a target — they are not covered by the MCP or tool-registration paths at all, so treat this as two distinct interception mechanisms to prove, not one.
+**Phase 3 — Transparent tool interception + one real agent integration (Section 3).** Build and validate at least one MCP-based integration (3.2) and the hook-based mechanism (3.3b) for at least one CLI coding agent (Claude Code and/or Codex — both are confirmed to expose a usable `PreToolUse`/`PostToolUse` hook API, though tool names and payload shapes differ per agent). Hooks are the recommended default for these agents (zero install, no directory-navigation gap) and should ship before FUSE (3.3a), which is only needed for CLI agents with neither a hook API nor a rebindable registry. Treat 3.2 and 3.3b as two distinct mechanisms to prove in this phase, not one; scope 3.3a to a later phase unless a target agent genuinely requires it.
 
 **Phase 4 — Disk flush + git commit + line-ending normalization.**
 
@@ -320,7 +355,7 @@ Do not start Phase 6 or Phase 8 until Phases 1–3 are proven against a real (no
 |---|---|---|
 | Sync server | Node.js + Yjs | Most mature reference implementation of this pattern |
 | Transport | WebSocket | Simple, cross-platform |
-| Tool interception | MCP proxy for MCP-based agents (3.2); framework-native rebinding where a registry exists (3.3); FUSE/WinFsp for CLI coding agents with compiled-in file tools — Claude Code, Codex (3.3a) | Three genuinely different mechanisms for three agent categories, not one default with fallbacks — see 3.0 |
+| Tool interception | MCP proxy for MCP-based agents (3.2); framework-native rebinding where a registry exists (3.3); pre/post-tool hooks for CLI agents that expose one, e.g. Claude Code (3.3b); FUSE/WinFsp only for CLI agents with neither (3.3a) | Four mechanisms for four agent categories, not one default with fallbacks — see 3.0. Hooks preferred over FUSE wherever both are technically possible. |
 | Client SDK (v1) | TypeScript/npm | Matches most current agent frameworks |
 | Client SDK (v2) | Python/PyPI | Second most common agent framework language |
 | Git integration | `simple-git` (Node) or shell to system `git` | Consistent across OSes |
@@ -335,4 +370,4 @@ Do not start Phase 6 or Phase 8 until Phases 1–3 are proven against a real (no
 - **Debounce tuning matters — and affects more than commit noise.** In-memory CRDT merge correctness doesn't depend on flush timing, but the validation gate (Section 6) only runs *at* flush. A long debounce window means agents can keep editing on top of an already-broken intermediate merge for the entire window before validation ever runs and catches it — so debounce is really tuning *time-to-feedback* on semantic breakage, not just commit/validation-run frequency. Too eager causes excessive commits/validation runs; too long widens both the staleness window (Section 12, other agents seeing current state) and the window where broken state can accumulate further edits before anyone finds out. Consider a bound on this independent of debounce — e.g. always flush-and-validate before a symbol-index-flagged file gets a second edit — rather than relying on debounce timing alone to catch it promptly.
 - **Presence/symbol-index data is advisory unless explicitly enforced server-side.** Nothing stops an agent from acting before checking it; the CRDT merge must stay correct regardless of whether any agent ever looks at awareness data.
 - **Lock TTL sizing** — too short causes false expiry mid-edit; too long blocks unnecessarily on a crashed peer. Make configurable per project.
-- **Framework coverage for transparent interception varies by category, not by maturity — see Section 3.0's decision table.** The generic MCP proxy (3.2) covers agents that expose file ops as MCP tools. LangChain-style tool registration (3.3) covers frameworks with a rebindable registry. Neither covers CLI coding agents with compiled-in native file tools (Claude Code, Codex) — those require the FUSE/WinFsp driver (3.3a), which is real per-OS engineering work, not a config change. Audit target agents against the table early; don't assume MCP or tool-registration coverage extends to CLI coding agents by default.
+- **Framework coverage for transparent interception varies by category, not by maturity — see Section 3.0's decision table.** The generic MCP proxy (3.2) covers agents that expose file ops as MCP tools. LangChain-style tool registration (3.3) covers frameworks with a rebindable registry. CLI coding agents with a pre/post-tool hook API — Claude Code (`PreToolUse`/`PostToolUse` on Edit/Write), Codex (`PreToolUse`/`PostToolUse` on `apply_patch`), and any equivalent — are covered by the hook mechanism (3.3b); prefer this over FUSE, since it needs no system install and has no directory-navigation gap. Codex's `PreToolUse` additionally supports outright denial, which is stronger than a passive pre-sync; but Codex's documented tool coverage has no listed hook path for plain file reads, a real gap worth confirming before assuming read-freshness parity with Claude Code (3.3b). Only CLI agents with neither a hook API nor a registry need the FUSE/WinFsp driver (3.3a), which as of this writing has two real blockers to production readiness: it requires the end user to enable a kernel extension (macFUSE) via a system-security setting, and the driver only implements the syscalls needed to prove per-file merge semantics (`open`/`read`/`write`/`truncate`/`flush`/`release`/`unlink`) — no `readdir`/`mkdir`/`rename` yet, so directory browsing on the mount currently fails. Audit target agents against the 3.0 table early, and confirm each agent's current hook documentation directly rather than assuming parity across agents.
