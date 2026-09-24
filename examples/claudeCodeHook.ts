@@ -39,11 +39,12 @@
 // from the working tree on first touch. Against a server with no repo root,
 // every room starts empty, and the Pre hook would faithfully overwrite an
 // existing local file with that emptiness.
-import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { CONFIG_FILE_NAME, loadAgentSyncConfigOrDefault, resolveSyncFileOpsOptions } from "../src/config/agentSyncConfig.js";
 import { SyncFileOps } from "../src/sync/syncFileOps.js";
 import { HookSnapshots, type SnapshotIdentity } from "./hookSnapshots.js";
+import { extractCandidatePaths, findWorkspaceRoot, toDocName } from "./workspaceRoot.js";
 
 interface HookInput {
   session_id?: string;
@@ -54,13 +55,6 @@ interface HookInput {
 }
 
 const snapshots = new HookSnapshots();
-
-/** `null` for a path outside the workspace (e.g. a system file) — those are left alone entirely, not synced. */
-function toDocName(workspaceRoot: string, filePath: string): string | null {
-  const rel = relative(workspaceRoot, filePath);
-  if (rel.startsWith("..") || isAbsolute(rel)) return null;
-  return rel.split(sep).join("/");
-}
 
 function makeOps(ownerId: string, workspaceRoot: string): SyncFileOps {
   const config = loadAgentSyncConfigOrDefault(join(workspaceRoot, CONFIG_FILE_NAME));
@@ -82,6 +76,9 @@ async function runPre(ops: SyncFileOps, docName: string, filePath: string, ident
   const remoteContent = await ops.readFile(docName);
   if (identity) snapshots.stash(identity, docName, remoteContent);
 
+  // A path that exists nowhere (empty room, no local file) is a guess or a file about to be created —
+  // don't materialize an empty stray file for it.
+  if (remoteContent === "" && !existsSync(filePath)) return;
   mkdirSync(dirname(filePath), { recursive: true });
   writeFileSync(filePath, remoteContent, "utf8");
 }
@@ -101,50 +98,14 @@ async function runPost(ops: SyncFileOps, docName: string, filePath: string, iden
   }
 }
 
-/**
- * Best-effort file-path extraction for a `Bash` tool call — not a real shell
- * parser. `Read`/`Edit`/`Write` name their target file directly; `Bash` only
- * gives a free-text command string, so anything it touches (`sed -i`, a
- * Python script that opens a path, `cp a b`) would otherwise bypass this
- * bridge entirely — confirmed live: an agent blocked twice by a genuine
- * RangeMismatchError fell back to editing via a Python script through Bash,
- * and that write never reached the CRDT doc at all. This narrows the gap for
- * the common cases (a literal, already-existing or extension-bearing path
- * token in the command) without pretending to close it — it cannot see a
- * path built from a variable, a glob, command substitution, or a heredoc.
- * The real fix for full coverage is FUSE/kernel-level interception, which
- * sees the actual syscalls regardless of what process issued them.
- */
-function extractCandidatePaths(workspaceRoot: string, command: string): string[] {
-  const tokens = command.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
-  const candidates = new Set<string>();
-  for (const raw of tokens) {
-    const token = raw.replace(/^["']|["']$/g, "");
-    if (!token || token.startsWith("-")) continue;
-    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(token)) continue; // URL
-    if (/[*?$`]/.test(token)) continue; // glob, variable, command substitution — can't resolve statically
-    const abs = isAbsolute(token) ? token : join(workspaceRoot, token);
-    let isFile: boolean;
-    try {
-      isFile = lstatSync(abs).isFile();
-    } catch {
-      isFile = /\.[a-zA-Z0-9]{1,10}$/.test(token); // doesn't exist yet — plausible new file if it looks like one
-    }
-    if (!isFile) continue;
-    const docName = toDocName(workspaceRoot, abs);
-    if (docName !== null) candidates.add(docName);
-  }
-  return [...candidates];
-}
-
-async function runPreBash(ops: SyncFileOps, workspaceRoot: string, command: string, identity: SnapshotIdentity): Promise<void> {
-  for (const docName of extractCandidatePaths(workspaceRoot, command)) {
+async function runPreBash(ops: SyncFileOps, workspaceRoot: string, baseDir: string, command: string, identity: SnapshotIdentity): Promise<void> {
+  for (const docName of extractCandidatePaths(workspaceRoot, baseDir, command)) {
     await runPre(ops, docName, join(workspaceRoot, docName), identity);
   }
 }
 
-async function runPostBash(ops: SyncFileOps, workspaceRoot: string, command: string, identity: SnapshotIdentity): Promise<void> {
-  for (const docName of extractCandidatePaths(workspaceRoot, command)) {
+async function runPostBash(ops: SyncFileOps, workspaceRoot: string, baseDir: string, command: string, identity: SnapshotIdentity): Promise<void> {
+  for (const docName of extractCandidatePaths(workspaceRoot, baseDir, command)) {
     const filePath = join(workspaceRoot, docName);
     if (!existsSync(filePath)) continue; // deleted or never created by the command — nothing to push
     await runPost(ops, docName, filePath, identity);
@@ -155,7 +116,8 @@ async function main(): Promise<void> {
   const mode = process.argv[2];
   const raw = readFileSync(0, "utf8");
   const input = (raw.trim() ? JSON.parse(raw) : {}) as HookInput;
-  const workspaceRoot = process.env.CLAUDE_PROJECT_DIR ?? input.cwd ?? process.cwd();
+  const baseDir = input.cwd ?? process.cwd();
+  const workspaceRoot = findWorkspaceRoot(baseDir);
   const identity = { workspaceRoot, sessionId: input.session_id, toolUseId: input.tool_use_id };
 
   if (input.tool_name === "Bash") {
@@ -164,9 +126,9 @@ async function main(): Promise<void> {
     const ops = makeOps(input.session_id ?? workspaceRoot, workspaceRoot);
     try {
       if (mode === "pre") {
-        await runPreBash(ops, workspaceRoot, command, identity);
+        await runPreBash(ops, workspaceRoot, baseDir, command, identity);
       } else if (mode === "post") {
-        await runPostBash(ops, workspaceRoot, command, identity);
+        await runPostBash(ops, workspaceRoot, baseDir, command, identity);
       }
     } finally {
       await ops.close();

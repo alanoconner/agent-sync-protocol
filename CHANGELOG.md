@@ -12,6 +12,12 @@ Tracks progress against the build order in [agent-sync-dev-spec.md](agent-sync-d
 - Wire the mounted FUSE truncate callback into snapshot-based writes and resize open descriptor buffers.
 - Add regression coverage for all seven fixes, including a mocked native FUSE binding. Verified with the TypeScript build and 124 tests across 20 files; a live OS mount was not exercised.
 
+## Phase 3 addendum — hook bridge resolves the project root, not the shell cwd
+
+- Found in a live run against a real repo: with `CLAUDE_PROJECT_DIR` unset, the hook used Claude Code's `cwd`, which follows the agent's `cd`. From `client/src` the same file was named `components/Foo.jsx` instead of `client/src/components/Foo.jsx` — a second, empty room (the dashboard showed both), whose `Pre` hook would overwrite the real local file with nothing. The hook now uses `CLAUDE_PROJECT_DIR`, else walks up from `cwd` to the nearest `.agent-sync.yml`/`.claude`/`.git` (`examples/workspaceRoot.ts`, `test/workspaceRoot.test.ts`).
+- Second live run showed stray root-level `SchemaDiagram.jsx`/`TableNode.jsx`: the Bash path scan resolved relative tokens against the project root instead of the shell's cwd, so `sed ... TableNode.jsx` run from `client/src/components` named a nonexistent root file, and `Pre` materialized it empty. Tokens now resolve against `cwd` (docs are still named relative to the project root), and `Pre` no longer creates an empty file for a path that exists neither locally nor in the room.
+- Third live run (same-line conflict test): one agent's edit never reached the room and no rejection fired — it edited via `python3 -c "p='client/…jsx'…"` through Bash, and the scan tokenized `p='client/…jsx'` as one garbage token (doc `p='client/…`), so the write silently bypassed sync (the known Bash gap, but a narrower one than it had to be). The scan now splits tokens on code punctuation (`= ' \" ( ) , ; < > | & [ ] { }`) and follows a `cd <dir>` earlier in the same command; non-existent tokens need an alphabetic extension to count as a plausible new file.
+
 ## Phase 7 addendum — `.agent-sync.yml` wired into every `SyncFileOps` consumer
 
 Phase 7 shipped the config file but only `agent-sync server` read it; `paths.exclusive` was parsed and consumed by nothing. Now:
