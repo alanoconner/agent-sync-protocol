@@ -24,6 +24,12 @@
 //     exits 2 so Claude Code surfaces the message to the agent as feedback —
 //     "the edit didn't stick, here's why, re-read and retry" (Section 3.5/3.6),
 //     not a silently-lost local-only edit.
+//   Bash (Pre + Post) — the command is never parsed. Pre pulls every room the
+//     server already holds onto disk and snapshots the workspace; Post diffs
+//     the workspace against that snapshot and pushes whatever changed through
+//     the same match-or-reject path, however the change was made (sed, a
+//     script, a formatter). Deletions and binary/oversized files aren't
+//     synced. See workspaceScan.ts.
 //
 // Wire it into a project's .claude/settings.json — see
 // claudeCodeHookSettings.example.json in this directory.
@@ -39,12 +45,15 @@
 // from the working tree on first touch. Against a server with no repo root,
 // every room starts empty, and the Pre hook would faithfully overwrite an
 // existing local file with that emptiness.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { statusUrlFor } from "../src/cli/dashboardView.js";
 import { CONFIG_FILE_NAME, loadAgentSyncConfigOrDefault, resolveSyncFileOpsOptions } from "../src/config/agentSyncConfig.js";
-import { SyncFileOps } from "../src/sync/syncFileOps.js";
+import { SyncFileOps, type SyncFileOpsOptions } from "../src/sync/syncFileOps.js";
 import { HookSnapshots, type SnapshotIdentity } from "./hookSnapshots.js";
-import { extractCandidatePaths, findWorkspaceRoot, toDocName } from "./workspaceRoot.js";
+import { WorkspaceScanner } from "./workspaceScan.js";
+import { findWorkspaceRoot, toDocName } from "./workspaceRoot.js";
 
 interface HookInput {
   session_id?: string;
@@ -56,16 +65,23 @@ interface HookInput {
 
 const snapshots = new HookSnapshots();
 
-function makeOps(ownerId: string, workspaceRoot: string): SyncFileOps {
+function hookConfig(ownerId: string, workspaceRoot: string): { options: SyncFileOpsOptions; ignore: string[] } {
   const config = loadAgentSyncConfigOrDefault(join(workspaceRoot, CONFIG_FILE_NAME));
   const envExclusive = process.env.AGENT_SYNC_EXCLUSIVE_PATHS;
-  return new SyncFileOps(
-    resolveSyncFileOpsOptions(config, {
-      syncServerUrl: process.env.AGENT_SYNC_SERVER,
-      exclusivePaths: envExclusive === undefined ? undefined : envExclusive.split(",").map((p) => p.trim()).filter(Boolean),
-      ownerId,
-    }),
-  );
+  const options = resolveSyncFileOpsOptions(config, {
+    syncServerUrl: process.env.AGENT_SYNC_SERVER,
+    exclusivePaths: envExclusive === undefined ? undefined : envExclusive.split(",").map((p) => p.trim()).filter(Boolean),
+    ownerId,
+  });
+  return { options, ignore: config.paths.ignore };
+}
+
+/** Make local disk match `content`. No-op when it already does (a redundant write only bumps mtime, which makes Claude Code think the file changed under it), and never materializes an empty stray file for a path that exists nowhere. */
+function materialize(filePath: string, content: string): void {
+  const exists = existsSync(filePath);
+  if (exists ? readFileSync(filePath, "utf8") === content : content === "") return;
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(filePath, content, "utf8");
 }
 
 async function runPre(ops: SyncFileOps, docName: string, filePath: string, identity?: SnapshotIdentity): Promise<void> {
@@ -75,40 +91,71 @@ async function runPre(ops: SyncFileOps, docName: string, filePath: string, ident
   // client-side "is the room empty but disk isn't?" guesswork needed here.
   const remoteContent = await ops.readFile(docName);
   if (identity) snapshots.stash(identity, docName, remoteContent);
+  materialize(filePath, remoteContent);
+}
 
-  // A path that exists nowhere (empty room, no local file) is a guess or a file about to be created —
-  // don't materialize an empty stray file for it.
-  if (remoteContent === "" && !existsSync(filePath)) return;
-  mkdirSync(dirname(filePath), { recursive: true });
-  writeFileSync(filePath, remoteContent, "utf8");
+/** Push `newContent` against `oldSnapshot`; on a rejection, revert the local file to shared truth and exit 2 so Claude Code shows the agent the message. */
+async function pushWrite(ops: SyncFileOps, docName: string, filePath: string, oldSnapshot: string, newContent: string, opts: { prefix?: string; isNew?: boolean } = {}): Promise<void> {
+  try {
+    await ops.writeFileFromSnapshot(docName, oldSnapshot, newContent);
+  } catch (err) {
+    const current = await ops.readFile(docName);
+    if (opts.isNew && current === "") rmSync(filePath, { force: true });
+    else writeFileSync(filePath, current, "utf8");
+    console.error(`${opts.prefix ?? ""}${err instanceof Error ? err.message : String(err)}`);
+    process.exitCode = 2;
+  }
 }
 
 async function runPost(ops: SyncFileOps, docName: string, filePath: string, identity: SnapshotIdentity): Promise<void> {
   const oldSnapshot = snapshots.take(identity, docName);
   const newContent = readFileSync(filePath, "utf8");
   if (newContent === oldSnapshot) return;
+  await pushWrite(ops, docName, filePath, oldSnapshot, newContent);
+}
 
+/**
+ * `Bash` can change any file by any means, and its command string can't be parsed reliably (two live runs
+ * bypassed sync through a Python script / sed the path scan misread), so this doesn't look at the command at
+ * all: Pre pulls every room the server already has (so the command sees shared truth) and snapshots the
+ * workspace; Post diffs the workspace against that snapshot and pushes whatever changed, via the same
+ * match-or-reject path as Edit/Write. See workspaceScan.ts.
+ */
+function runIdFor(identity: SnapshotIdentity): string {
+  if (!identity.sessionId || !identity.toolUseId) throw new Error("Bash hook requires session_id and tool_use_id.");
+  return createHash("sha256").update(JSON.stringify([identity.sessionId, identity.toolUseId])).digest("hex");
+}
+
+/** Rooms the server already holds — the only files whose shared content could differ from local disk. Empty (i.e. skip the pull) if the status endpoint is unreachable. */
+async function fetchRoomNames(serverUrl: string): Promise<string[]> {
   try {
-    await ops.writeFileFromSnapshot(docName, oldSnapshot, newContent);
-  } catch (err) {
-    const current = await ops.readFile(docName);
-    writeFileSync(filePath, current, "utf8");
-    console.error(err instanceof Error ? err.message : String(err));
-    process.exitCode = 2;
+    const res = await fetch(statusUrlFor(serverUrl), { signal: AbortSignal.timeout(2000) });
+    if (!res.ok) return [];
+    const body = (await res.json()) as { rooms?: { docName: string }[] };
+    return (body.rooms ?? []).map((room) => room.docName);
+  } catch {
+    return [];
   }
 }
 
-async function runPreBash(ops: SyncFileOps, workspaceRoot: string, baseDir: string, command: string, identity: SnapshotIdentity): Promise<void> {
-  for (const docName of extractCandidatePaths(workspaceRoot, baseDir, command)) {
-    await runPre(ops, docName, join(workspaceRoot, docName), identity);
-  }
+async function runPreBash(ops: SyncFileOps, scanner: WorkspaceScanner, workspaceRoot: string, serverUrl: string, identity: SnapshotIdentity): Promise<void> {
+  const runId = runIdFor(identity);
+  const docNames = (await fetchRoomNames(serverUrl)).filter((docName) => {
+    const abs = resolve(workspaceRoot, docName);
+    return toDocName(workspaceRoot, abs) === docName && !scanner.isExcluded(docName);
+  });
+  await Promise.all(docNames.map(async (docName) => materialize(join(workspaceRoot, docName), await ops.readFile(docName))));
+  scanner.saveRun(runId, scanner.snapshot());
 }
 
-async function runPostBash(ops: SyncFileOps, workspaceRoot: string, baseDir: string, command: string, identity: SnapshotIdentity): Promise<void> {
-  for (const docName of extractCandidatePaths(workspaceRoot, baseDir, command)) {
-    const filePath = join(workspaceRoot, docName);
-    if (!existsSync(filePath)) continue; // deleted or never created by the command — nothing to push
-    await runPost(ops, docName, filePath, identity);
+async function runPostBash(ops: SyncFileOps, scanner: WorkspaceScanner, workspaceRoot: string, identity: SnapshotIdentity): Promise<void> {
+  const { changes, warnings } = scanner.changes(scanner.takeRun(runIdFor(identity)));
+  for (const warning of warnings) console.error(`agent-sync: ${warning}`);
+  for (const change of changes) {
+    await pushWrite(ops, change.docName, join(workspaceRoot, change.docName), change.before, change.after, {
+      prefix: `${change.docName}: `,
+      isNew: change.isNew,
+    });
   }
 }
 
@@ -121,14 +168,14 @@ async function main(): Promise<void> {
   const identity = { workspaceRoot, sessionId: input.session_id, toolUseId: input.tool_use_id };
 
   if (input.tool_name === "Bash") {
-    const command = input.tool_input?.command;
-    if (typeof command !== "string") return;
-    const ops = makeOps(input.session_id ?? workspaceRoot, workspaceRoot);
+    const { options, ignore } = hookConfig(input.session_id ?? workspaceRoot, workspaceRoot);
+    const ops = new SyncFileOps(options);
+    const scanner = new WorkspaceScanner(workspaceRoot, ignore);
     try {
       if (mode === "pre") {
-        await runPreBash(ops, workspaceRoot, baseDir, command, identity);
+        await runPreBash(ops, scanner, workspaceRoot, options.serverUrl, identity);
       } else if (mode === "post") {
-        await runPostBash(ops, workspaceRoot, baseDir, command, identity);
+        await runPostBash(ops, scanner, workspaceRoot, identity);
       }
     } finally {
       await ops.close();
@@ -143,7 +190,7 @@ async function main(): Promise<void> {
   const docName = toDocName(workspaceRoot, filePath);
   if (docName === null) return;
 
-  const ops = makeOps(input.session_id ?? workspaceRoot, workspaceRoot);
+  const ops = new SyncFileOps(hookConfig(input.session_id ?? workspaceRoot, workspaceRoot).options);
   try {
     if (mode === "pre") {
       await runPre(ops, docName, filePath, input.tool_name === "Read" ? undefined : identity);

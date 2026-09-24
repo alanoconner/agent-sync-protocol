@@ -132,7 +132,7 @@ Each flush commits only its target path, leaving unrelated staged changes staged
 
 **Known limitations of this bridge** (see [CLAUDE.md](CLAUDE.md) for detail):
 - A rejected `Edit`/`Write` (concurrent edit, lock held, failed validation) reverts the local file and surfaces the error to the agent — expected behavior, not a failure.
-- A `Bash` call is covered only best-effort: the hook scans the command string for literal file-path tokens, so a path built from a shell variable, glob, or command substitution still bypasses sync silently. Full coverage needs the FUSE mount instead.
+- A `Bash` call is covered by diffing the workspace before and after it (git-tracked plus untracked-but-not-ignored files, minus `paths.ignore`), so it works however the command changes a file — `sed`, a script, a formatter. What it cannot see: file deletions, binary or >1 MB files, and changes made by a process that keeps running after the command returns. Full coverage of those needs the FUSE mount instead.
 - A room is hydrated from the server's repo root once, when it's first created. A file changed on disk behind the server's back after that (a manual `git pull` in the canonical checkout, say) is not picked up until the server restarts — the room is the source of truth once it exists.
 
 ## Testing this project itself
