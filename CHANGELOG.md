@@ -2,6 +2,16 @@
 
 Tracks progress against the build order in [agent-sync-dev-spec.md](agent-sync-dev-spec.md) Section 10. Entries are grouped by phase, in build order, not by date. See `CLAUDE.md` for the architectural detail behind each item — this file is a progress record, not a design doc.
 
+## Reliability fixes — hooks, persistence, transport, and FUSE
+
+- Isolate hook snapshots by workspace, session, tool-call ID, and document path; do not store snapshots for read-only hooks.
+- Restore pre-flush disk bytes on validation rejection without Git checkout or index mutation; remove only files that did not previously exist.
+- Limit flush commits to their literal target path and mark content flushed only after Git succeeds, allowing retries after staging or commit failures.
+- Close failed initial clients and evict rejected connection promises so later operations can reconnect.
+- Encode document paths in WebSocket URLs and decode them on the server, preserving spaces, Unicode, and query/fragment characters.
+- Wire the mounted FUSE truncate callback into snapshot-based writes and resize open descriptor buffers.
+- Add regression coverage for all seven fixes, including a mocked native FUSE binding. Verified with the TypeScript build and 124 tests across 20 files; a live OS mount was not exercised.
+
 ## Phase 7 addendum — `.agent-sync.yml` wired into every `SyncFileOps` consumer
 
 Phase 7 shipped the config file but only `agent-sync server` read it; `paths.exclusive` was parsed and consumed by nothing. Now:

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +6,7 @@ import { simpleGit, type SimpleGit } from "simple-git";
 import { SyncServer } from "../src/server/syncServer.js";
 import { SyncClient } from "../src/client/SyncClient.js";
 import { DiskFlushService } from "../src/flush/diskFlushService.js";
+import { ValidationGateService } from "../src/validation/validationGateService.js";
 
 async function makeRepo(): Promise<{ dir: string; git: SimpleGit }> {
   const dir = await mkdtemp(join(tmpdir(), "agent-sync-flush-"));
@@ -36,6 +37,7 @@ describe("Phase 4: disk flush + git commit (Section 6)", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     flush?.close();
     for (const client of clients.splice(0)) client.close();
     await server.close();
@@ -52,6 +54,73 @@ describe("Phase 4: disk flush + git commit (Section 6)", () => {
   async function waitForServerContent(docName: string, expected: string): Promise<void> {
     await vi.waitFor(() => expect(server.getDocContent(docName)).toBe(expected));
   }
+
+  it.each([false, true])("leaves unrelated staged changes out of a flush commit (existing HEAD: %s)", async (hasHead) => {
+    if (hasHead) await git.commit("initial", { "--allow-empty": null });
+    await writeFile(join(repoDir, "unrelated.txt"), "user staging");
+    await git.add("unrelated.txt");
+    flush = new DiskFlushService({ server, repoRoot: repoDir, git, autoFlush: false });
+    const client = makeClient("target.txt");
+    await client.connect();
+    await client.whenSynced();
+    client.getText().insert(0, "target");
+    await waitForServerContent("target.txt", "target");
+    await flush.flushAll();
+    expect((await git.raw(["ls-tree", "--name-only", "HEAD"])).trim()).toBe("target.txt");
+    expect((await git.diff(["--cached", "--name-only"])).trim()).toBe("unrelated.txt");
+  });
+
+  it.each(["add", "commit"] as const)("retries unchanged content after a failed git %s", async (operation) => {
+    flush = new DiskFlushService({ server, repoRoot: repoDir, git, autoFlush: false });
+    const client = makeClient("retry.txt");
+    await client.connect();
+    await client.whenSynced();
+    client.getText().insert(0, "retry me");
+    await waitForServerContent("retry.txt", "retry me");
+    const failure = vi.spyOn(git, operation).mockRejectedValueOnce(new Error("temporary Git failure"));
+    await expect(flush.flushAll()).rejects.toThrow("temporary Git failure");
+    failure.mockRestore();
+    await flush.flushAll();
+    expect(await git.show(["HEAD:retry.txt"])).toBe("retry me");
+  });
+
+  it("restores pre-flush bytes on rejection even with a locked Git index", async () => {
+    await writeFile(join(repoDir, "tracked.txt"), "committed");
+    await git.add("tracked.txt");
+    await git.commit("initial");
+    await writeFile(join(repoDir, "tracked.txt"), "staged");
+    await git.add("tracked.txt");
+    await writeFile(join(repoDir, "tracked.txt"), "unstaged\r\n");
+    await writeFile(join(repoDir, ".git", "index.lock"), "test lock");
+    const validation = new ValidationGateService({ command: "node -e 'process.exit(1)'", cwd: repoDir, onFail: "reject_merge" });
+    flush = new DiskFlushService({ server, repoRoot: repoDir, git, validation, autoFlush: false });
+    const client = makeClient("tracked.txt");
+    await client.connect();
+    await client.whenSynced();
+    client.getText().insert(0, "invalid edit");
+    await waitForServerContent("tracked.txt", "invalid edit");
+    await flush.flushAll();
+    expect(await readFile(join(repoDir, "tracked.txt"), "utf8")).toBe("unstaged\r\n");
+    expect(await git.show([":tracked.txt"])).toBe("staged");
+  });
+
+  it.each(["hello world.txt", "日本語.txt", "a?b#c%.txt", "literal*.txt"])("round-trips the literal filename %s through hydration and flush", async (docName) => {
+    await server.close();
+    await writeFile(join(repoDir, docName), "baseline");
+    const { createDiskHydrator } = await import("../src/flush/diskHydration.js");
+    server = new SyncServer(0, { hydrate: createDiskHydrator(repoDir) });
+    serverUrl = `ws://localhost:${server.port}`;
+    flush = new DiskFlushService({ server, repoRoot: repoDir, git, autoFlush: false });
+    const client = makeClient(docName);
+    await client.connect();
+    await client.whenSynced();
+    expect(client.getText().toString()).toBe("baseline");
+    client.getText().insert(8, " edited");
+    await waitForServerContent(docName, "baseline edited");
+    await flush.flushAll();
+    expect(await readFile(join(repoDir, docName), "utf8")).toBe("baseline edited");
+    expect(server.getDocNames()).toEqual([docName]);
+  });
 
   it("auto-flushes a doc to disk and commits it after the debounce window", async () => {
     flush = new DiskFlushService({ server, repoRoot: repoDir, debounceMs: 30 });

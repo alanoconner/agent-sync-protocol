@@ -95,9 +95,10 @@ export async function mountSyncFs(options: MountOptions): Promise<() => Promise<
         }
       },
       truncate(path, size, cb) {
-        void path;
-        void size;
-        cb(0);
+        ops.truncatePath(stripLeadingSlash(path), size).then(
+          () => cb(0),
+          (err) => cb(toErrno(err, Fuse)),
+        );
       },
       // Section 3.6: a rejected merge comes back as a real POSIX error code
       // (EAGAIN) rather than a generic I/O failure, so agents with the usual

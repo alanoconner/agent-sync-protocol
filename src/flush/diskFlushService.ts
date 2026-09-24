@@ -1,4 +1,4 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { simpleGit, type SimpleGit } from "simple-git";
 import type { DocHydratedEvent, DocUpdateEvent, SyncServer } from "../server/syncServer.js";
@@ -138,6 +138,14 @@ export class DiskFlushService {
     if (this.lastFlushedContent.get(docName) === content) return;
 
     const absPath = this.resolveWithinRepo(docName);
+    // Roll back exactly what this flush replaced, without touching Git's index.
+    // Only ENOENT proves this was a new file; all other read errors abort.
+    let previousContent: Buffer | undefined;
+    try {
+      previousContent = await readFile(absPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
     await mkdir(dirname(absPath), { recursive: true });
     await writeFile(absPath, fromLf(content, this.lineEndings), "utf8");
 
@@ -145,12 +153,8 @@ export class DiskFlushService {
       const result = await this.validation.run();
       if (!result.passed) {
         if (this.validation.onFail === "reject_merge") {
-          // Section 6: revert the flush and leave pre-flush state active —
-          // the *disk*/git working tree goes back to the last good commit,
-          // but the CRDT (the actual source of truth) is untouched, so
-          // agents keep editing against current reality and simply get
-          // another chance to flush-and-validate on their next edit.
-          await this.revertDiskWrite(docName, absPath);
+          // Restore the pre-flush disk state; the live CRDT remains untouched.
+          await this.revertDiskWrite(absPath, previousContent);
           this.server.setValidationRejection(docName, formatRejectionMessage(this.validation.command));
           this.server.emit("validationRejected", [
             { docName, command: this.validation.command, output: result.output },
@@ -166,26 +170,27 @@ export class DiskFlushService {
       }
     }
 
-    this.lastFlushedContent.set(docName, content);
-    await this.git.add(docName);
+    const pathspec = `:(literal)${docName}`;
+    await this.git.add(["--", pathspec]);
     try {
       // Commit-per-flush per spec Section 6, for traceability of which agent's
       // edit landed when — squashing/rebasing this history is a later concern.
-      await this.git.commit(`agent-sync: flush ${docName}`);
+      await this.git.commit(`agent-sync: flush ${docName}`, [pathspec], { "--only": null });
     } catch (err) {
       // The write above can still be a no-op from git's point of view (e.g.
       // content flushed once already got hand-committed outside this
       // service) — that's not a flush failure.
       if (!isNothingToCommitError(err)) throw err;
     }
+    this.lastFlushedContent.set(docName, content);
   }
 
-  /** Undoes a rejected flush's on-disk write: restores the last-committed content, or removes the file entirely if this would have been its first-ever commit. */
-  private async revertDiskWrite(docName: string, absPath: string): Promise<void> {
-    try {
-      await this.git.raw(["checkout", "HEAD", "--", docName]);
-    } catch {
+  /** Undo only this flush, preserving pre-existing uncommitted content and staging. */
+  private async revertDiskWrite(absPath: string, previousContent: Buffer | undefined): Promise<void> {
+    if (previousContent === undefined) {
       await rm(absPath, { force: true });
+    } else {
+      await writeFile(absPath, previousContent);
     }
   }
 

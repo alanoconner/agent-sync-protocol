@@ -78,6 +78,22 @@ export class SyncFsOperations {
     return this.requireOpen(fd).buffer.length;
   }
 
+  /** Apply path-based truncate immediately, then refresh existing descriptors. */
+  async truncatePath(path: string, size: number): Promise<void> {
+    const snapshot = await this.ops.readFile(path);
+    const resized = Buffer.alloc(size);
+    Buffer.from(snapshot, "utf8").copy(resized);
+    const content = resized.toString("utf8");
+    await this.ops.writeFileFromSnapshot(path, snapshot, content);
+    for (const file of this.openFiles.values()) {
+      if (file.path !== path) continue;
+      const buffer = Buffer.alloc(size);
+      file.buffer.copy(buffer);
+      file.buffer = buffer;
+      file.snapshot = content;
+    }
+  }
+
   /** Pushes this fd's buffered content to the sync layer as an edit against its own last-known snapshot, then re-baselines the snapshot so a later flush on the same fd diffs incrementally. */
   async flush(fd: number): Promise<void> {
     const file = this.requireOpen(fd);

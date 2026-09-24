@@ -184,7 +184,13 @@ export class SyncServer extends Observable<string> {
   }
 
   private handleConnection(ws: WebSocket, url: string): void {
-    const docName = new URL(url, "ws://placeholder").pathname.replace(/^\//, "") || "default";
+    let docName: string;
+    try {
+      docName = decodeURIComponent(new URL(url, "ws://placeholder").pathname.replace(/^\//, "")) || "default";
+    } catch {
+      ws.close(1008, "Invalid document path encoding");
+      return;
+    }
     const room = this.getRoom(docName);
     room.clients.set(ws, new Set());
 

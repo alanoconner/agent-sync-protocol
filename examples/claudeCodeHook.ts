@@ -39,39 +39,21 @@
 // from the working tree on first touch. Against a server with no repo root,
 // every room starts empty, and the Pre hook would faithfully overwrite an
 // existing local file with that emptiness.
-import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { CONFIG_FILE_NAME, loadAgentSyncConfigOrDefault, resolveSyncFileOpsOptions } from "../src/config/agentSyncConfig.js";
 import { SyncFileOps } from "../src/sync/syncFileOps.js";
+import { HookSnapshots, type SnapshotIdentity } from "./hookSnapshots.js";
 
 interface HookInput {
   session_id?: string;
+  tool_use_id?: string;
   cwd?: string;
   tool_name?: string;
   tool_input?: { file_path?: string; command?: string };
 }
 
-const SNAPSHOT_DIR = join(tmpdir(), "agent-sync-hook-snapshots");
-
-function snapshotPath(docName: string): string {
-  return join(SNAPSHOT_DIR, `${createHash("sha256").update(docName).digest("hex")}.snapshot`);
-}
-
-function stashSnapshot(docName: string, content: string): void {
-  mkdirSync(SNAPSHOT_DIR, { recursive: true });
-  writeFileSync(snapshotPath(docName), content, "utf8");
-}
-
-/** Consumed once, like the server's own validation-rejection notice — if Pre never ran for this call, "" is the safest fallback: writeFileFromSnapshot treats an empty oldStr as "only apply blind if nothing changed concurrently," so a stale/missing snapshot rejects rather than silently misapplying. */
-function takeSnapshot(docName: string): string {
-  const path = snapshotPath(docName);
-  if (!existsSync(path)) return "";
-  const content = readFileSync(path, "utf8");
-  unlinkSync(path);
-  return content;
-}
+const snapshots = new HookSnapshots();
 
 /** `null` for a path outside the workspace (e.g. a system file) — those are left alone entirely, not synced. */
 function toDocName(workspaceRoot: string, filePath: string): string | null {
@@ -92,20 +74,20 @@ function makeOps(ownerId: string, workspaceRoot: string): SyncFileOps {
   );
 }
 
-async function runPre(ops: SyncFileOps, docName: string, filePath: string): Promise<void> {
+async function runPre(ops: SyncFileOps, docName: string, filePath: string, identity?: SnapshotIdentity): Promise<void> {
   // A room being created right now is seeded by the server from its repo
   // root's working tree (createDiskHydrator) before this read resolves, so
   // an existing file comes back as itself, not as an empty doc — no
   // client-side "is the room empty but disk isn't?" guesswork needed here.
   const remoteContent = await ops.readFile(docName);
+  if (identity) snapshots.stash(identity, docName, remoteContent);
 
   mkdirSync(dirname(filePath), { recursive: true });
   writeFileSync(filePath, remoteContent, "utf8");
-  stashSnapshot(docName, remoteContent);
 }
 
-async function runPost(ops: SyncFileOps, docName: string, filePath: string): Promise<void> {
-  const oldSnapshot = takeSnapshot(docName);
+async function runPost(ops: SyncFileOps, docName: string, filePath: string, identity: SnapshotIdentity): Promise<void> {
+  const oldSnapshot = snapshots.take(identity, docName);
   const newContent = readFileSync(filePath, "utf8");
   if (newContent === oldSnapshot) return;
 
@@ -155,17 +137,17 @@ function extractCandidatePaths(workspaceRoot: string, command: string): string[]
   return [...candidates];
 }
 
-async function runPreBash(ops: SyncFileOps, workspaceRoot: string, command: string): Promise<void> {
+async function runPreBash(ops: SyncFileOps, workspaceRoot: string, command: string, identity: SnapshotIdentity): Promise<void> {
   for (const docName of extractCandidatePaths(workspaceRoot, command)) {
-    await runPre(ops, docName, join(workspaceRoot, docName));
+    await runPre(ops, docName, join(workspaceRoot, docName), identity);
   }
 }
 
-async function runPostBash(ops: SyncFileOps, workspaceRoot: string, command: string): Promise<void> {
+async function runPostBash(ops: SyncFileOps, workspaceRoot: string, command: string, identity: SnapshotIdentity): Promise<void> {
   for (const docName of extractCandidatePaths(workspaceRoot, command)) {
     const filePath = join(workspaceRoot, docName);
     if (!existsSync(filePath)) continue; // deleted or never created by the command — nothing to push
-    await runPost(ops, docName, filePath);
+    await runPost(ops, docName, filePath, identity);
   }
 }
 
@@ -174,6 +156,7 @@ async function main(): Promise<void> {
   const raw = readFileSync(0, "utf8");
   const input = (raw.trim() ? JSON.parse(raw) : {}) as HookInput;
   const workspaceRoot = process.env.CLAUDE_PROJECT_DIR ?? input.cwd ?? process.cwd();
+  const identity = { workspaceRoot, sessionId: input.session_id, toolUseId: input.tool_use_id };
 
   if (input.tool_name === "Bash") {
     const command = input.tool_input?.command;
@@ -181,9 +164,9 @@ async function main(): Promise<void> {
     const ops = makeOps(input.session_id ?? workspaceRoot, workspaceRoot);
     try {
       if (mode === "pre") {
-        await runPreBash(ops, workspaceRoot, command);
+        await runPreBash(ops, workspaceRoot, command, identity);
       } else if (mode === "post") {
-        await runPostBash(ops, workspaceRoot, command);
+        await runPostBash(ops, workspaceRoot, command, identity);
       }
     } finally {
       await ops.close();
@@ -201,9 +184,9 @@ async function main(): Promise<void> {
   const ops = makeOps(input.session_id ?? workspaceRoot, workspaceRoot);
   try {
     if (mode === "pre") {
-      await runPre(ops, docName, filePath);
+      await runPre(ops, docName, filePath, input.tool_name === "Read" ? undefined : identity);
     } else if (mode === "post" && input.tool_name !== "Read") {
-      await runPost(ops, docName, filePath);
+      await runPost(ops, docName, filePath, identity);
     }
   } finally {
     await ops.close();

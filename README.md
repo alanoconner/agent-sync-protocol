@@ -124,6 +124,10 @@ This is the path that's actually been live-tested end-to-end with real Claude Co
 
 The hook reads the worktree's own `.agent-sync.yml` for `server` and `paths.exclusive` (hot files routed through the lock service instead of CRDT merge alone). `AGENT_SYNC_SERVER` and `AGENT_SYNC_EXCLUSIVE_PATHS` (comma-separated relative paths), set as env vars in the hook command, override those two fields if you'd rather not keep a config file in the worktree.
 
+Edit/Write/Bash hook payloads must include matching `session_id` and `tool_use_id` values in the pre/post pair. Snapshots are isolated by workspace, session, tool call, and file path. Read hooks refresh disk without creating a snapshot. A missing snapshot is reported as a hook warning instead of being treated as an empty file.
+
+Each flush commits only its target path, leaving unrelated staged changes staged. If validation rejects a flush, the service restores the exact pre-flush disk contents (including uncommitted changes), or removes the file only if it was absent before the flush. Failed Git operations leave the content eligible for retry through `flushPath()` or `flushAll()`.
+
 **The server must be started with a repo root** (step 2 above, or `agent-sync server --repo-root`). That's what hydrates a brand-new room from the working tree the first time any agent touches an existing file; against a server with no repo root, every room starts empty and the hook would overwrite an existing local file with that emptiness.
 
 **Known limitations of this bridge** (see [CLAUDE.md](CLAUDE.md) for detail):

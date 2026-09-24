@@ -60,7 +60,8 @@ export class SyncClient extends Observable<string> {
     // phantom peer in everyone else's list (same reasoning as the server
     // clearing its own room-doc's phantom self-entry).
     this.awareness.setLocalState(null);
-    this.url = `${options.serverUrl.replace(/\/$/, "")}/${options.docName}`;
+    const encodedPath = options.docName.split("/").map(encodeURIComponent).join("/");
+    this.url = `${options.serverUrl.replace(/\/$/, "")}/${encodedPath}`;
     this.autoReconnect = options.autoReconnect ?? true;
     this.reconnectOptions = {
       baseDelayMs: options.reconnect?.baseDelayMs ?? 200,

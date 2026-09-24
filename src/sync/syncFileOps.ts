@@ -126,10 +126,17 @@ export class SyncFileOps {
     if (!pending) {
       pending = (async () => {
         const client = new SyncClient({ serverUrl: this.options.serverUrl, docName: path });
-        await client.connect();
-        await client.whenSynced();
-        this.clients.set(path, client);
-        return client;
+        try {
+          await client.connect();
+          await client.whenSynced();
+          this.clients.set(path, client);
+          return client;
+        } catch (err) {
+          client.close();
+          throw err;
+        } finally {
+          this.pending.delete(path);
+        }
       })();
       this.pending.set(path, pending);
     }
