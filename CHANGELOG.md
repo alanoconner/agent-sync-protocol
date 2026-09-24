@@ -2,6 +2,28 @@
 
 Tracks progress against the build order in [agent-sync-dev-spec.md](agent-sync-dev-spec.md) Section 10. Entries are grouped by phase, in build order, not by date. See `CLAUDE.md` for the architectural detail behind each item — this file is a progress record, not a design doc.
 
+## Phase 7 addendum — `.agent-sync.yml` wired into every `SyncFileOps` consumer
+
+Phase 7 shipped the config file but only `agent-sync server` read it; `paths.exclusive` was parsed and consumed by nothing. Now:
+
+- `resolveSyncFileOpsOptions(config, overrides)` (`src/config/agentSyncConfig.ts`) is the single place a parsed config becomes `SyncFileOps` options (`server` → `serverUrl`, `paths.exclusive` → `exclusivePaths`). Explicit overrides win; a server URL from neither source is a hard error rather than a guessed `localhost:4600`.
+- `McpSyncProxyOptions` and `MountOptions` accept `config?: AgentSyncConfig`; their `syncServerUrl`/`serverUrl` became optional (required only when no config is given). Existing explicit-options callers are unaffected.
+- `examples/claudeCodeHook.ts` loads the workspace's `.agent-sync.yml` via `loadAgentSyncConfigOrDefault`; `AGENT_SYNC_SERVER`/`AGENT_SYNC_EXCLUSIVE_PATHS` remain as per-hook overrides.
+- `line_endings` from the config now actually reaches `DiskFlushService` (`StartServerOptions.lineEndings`, passed by the CLI's `server` command) — it was parsed but dropped before.
+- Verified: new `resolveSyncFileOpsOptions` tests, a config-driven `McpSyncProxy` test proving a write to a `paths.exclusive` path held by another owner comes back `EBUSY`, and a live smoke test of the hook bridge reading `paths.exclusive` from a real `.agent-sync.yml`.
+- Still not consumed anywhere: `paths.ignore` and `symbol_index` (Phase 8).
+
+## Phase 4 addendum — disk→CRDT hydration on room creation
+
+Phase 4 only ever flushed doc→disk; a brand-new room always started empty, which is why the hook bridge needed its "room empty but disk isn't, so seed from disk" heuristic (and why that heuristic couldn't tell a never-synced file from a legitimately emptied one).
+
+- `SyncServer` takes `SyncServerOptions.hydrate?: (docName) => string | undefined`, called exactly once per room on creation, synchronously and *before* the first client is greeted — so the sync-step-1/2 exchange already carries the seeded content. It emits `docHydrated` (not `docUpdate`) for seeded content; the server itself stays agnostic about what a doc name means.
+- `createDiskHydrator(repoRoot)` (`src/flush/diskHydration.ts`) is the hydrator that treats a doc name as a path under the repo root — same convention and same refuse-to-escape-the-root discipline as `DiskFlushService`. Content is `toLf`-normalized on the way in, since this is a write entry point into the CRDT like any other.
+- `DiskFlushService` listens to `docHydrated` and primes its last-seen/last-flushed trackers, so hydrated content (already on disk by definition) is neither re-written nor no-op-committed until a real edit lands.
+- `startAgentSyncServer` installs the hydrator whenever `repoRoot` is set, so both the env-var binary and `agent-sync server` get it with no new flag. Without a repo root, rooms still start empty as before.
+- The hook bridge's seeding heuristic is removed; it now relies on the server hydrating. Consequence, documented in the hook header and README: the bridge requires a server started with a repo root.
+- Verified: `test/diskHydration.test.ts` (10 tests: hydrator in isolation, first-connect sees disk content, hydrate-once semantics, `docHydrated`-not-`docUpdate`, no no-op commit, snapshot write against a freshly hydrated room merges), plus a live smoke test with simulated hook stdin against a real server + git repo (first-touch `Read` preserved local content; `Edit` merged and committed).
+
 ## Docs — README.md added
 
 Added `README.md` as the setup/usage entry point (install, running the server env-var- vs. config-driven, `.agent-sync.yml` reference, CLI command reference, and step-by-step instructions for wiring up the Claude Code hook bridge against real agents, including its known limitations). `CLAUDE.md` remains the architecture reference for contributors; this is the user-facing "how do I run this" doc.

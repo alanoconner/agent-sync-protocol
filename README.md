@@ -51,7 +51,7 @@ AGENT_SYNC_VALIDATE_COMMAND="npm test" AGENT_SYNC_REPO_ROOT=/path/to/repo npm ru
 AGENT_SYNC_VALIDATE_ON_FAIL=warn_only ...                         # commit anyway on a failing gate, instead of reverting (reject_merge default)
 ```
 
-With no `AGENT_SYNC_REPO_ROOT`, the server holds everything in memory only — good for trying things out, but nothing survives a restart.
+With `AGENT_SYNC_REPO_ROOT` (or `--repo-root`), a room is also seeded from the working tree the first time it's created, so an existing file's first sync starts from its real content. With no repo root, the server holds everything in memory only and every room starts empty — good for trying things out, but nothing survives a restart.
 
 ## `.agent-sync.yml`
 
@@ -122,12 +122,14 @@ This is the path that's actually been live-tested end-to-end with real Claude Co
 4. Run `claude` normally in each worktree — it keeps calling `Read`/`Edit`/`Write`/`Bash` exactly as usual; the hooks pull fresh shared content before each call and push the result after.
 5. Watch it: `npm run cli -- dashboard` shows which files have active rooms. A room's `peers` list will usually show `(nobody)` — each hook invocation is a short-lived process, not a persistent connection, so presence is necessarily spotty. That's expected, not a bug; it doesn't mean the sync isn't working.
 
-`AGENT_SYNC_EXCLUSIVE_PATHS` (comma-separated relative paths, set as an env var alongside `AGENT_SYNC_SERVER` in the hook command) routes hot files through the lock service instead of relying on CRDT merge alone.
+The hook reads the worktree's own `.agent-sync.yml` for `server` and `paths.exclusive` (hot files routed through the lock service instead of CRDT merge alone). `AGENT_SYNC_SERVER` and `AGENT_SYNC_EXCLUSIVE_PATHS` (comma-separated relative paths), set as env vars in the hook command, override those two fields if you'd rather not keep a config file in the worktree.
+
+**The server must be started with a repo root** (step 2 above, or `agent-sync server --repo-root`). That's what hydrates a brand-new room from the working tree the first time any agent touches an existing file; against a server with no repo root, every room starts empty and the hook would overwrite an existing local file with that emptiness.
 
 **Known limitations of this bridge** (see [CLAUDE.md](CLAUDE.md) for detail):
 - A rejected `Edit`/`Write` (concurrent edit, lock held, failed validation) reverts the local file and surfaces the error to the agent — expected behavior, not a failure.
 - A `Bash` call is covered only best-effort: the hook scans the command string for literal file-path tokens, so a path built from a shell variable, glob, or command substitution still bypasses sync silently. Full coverage needs the FUSE mount instead.
-- The very first time any agent touches an already-existing file, the hook seeds the (empty) CRDT room from disk rather than wiping local content — a heuristic, not real disk→CRDT hydration, since it can't distinguish "never synced" from "legitimately emptied."
+- A room is hydrated from the server's repo root once, when it's first created. A file changed on disk behind the server's back after that (a manual `git pull` in the canonical checkout, say) is not picked up until the server restarts — the room is the source of truth once it exists.
 
 ## Testing this project itself
 

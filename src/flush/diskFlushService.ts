@@ -1,7 +1,7 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { simpleGit, type SimpleGit } from "simple-git";
-import type { DocUpdateEvent, SyncServer } from "../server/syncServer.js";
+import type { DocHydratedEvent, DocUpdateEvent, SyncServer } from "../server/syncServer.js";
 import { fromLf, type LineEndingStyle } from "../sync/lineEndings.js";
 import { ValidationGateService } from "../validation/validationGateService.js";
 
@@ -54,6 +54,7 @@ export class DiskFlushService {
   /** Content last seen via `docUpdate`, distinct from `lastFlushedContent` — this is what gates *scheduling* a flush at all, so that a doc-internal change which isn't the file content (e.g. this service's own `_validation` rejection-notice write, Y.Map not Y.Text) doesn't re-trigger the debounce timer and loop back into validating the exact same rejected content forever. */
   private readonly lastSeenContent = new Map<string, string>();
   private readonly onDocUpdate: (event: DocUpdateEvent) => void;
+  private readonly onDocHydrated: (event: DocHydratedEvent) => void;
   /**
    * Serializes every flush (auto or manual) through one queue, regardless of
    * which doc it's for. Two docs' debounce timers can legitimately fire
@@ -79,6 +80,17 @@ export class DiskFlushService {
       if (this.autoFlush) this.scheduleFlush(docName);
     };
     this.server.on("docUpdate", this.onDocUpdate);
+
+    // Hydrated content came *from* disk (see createDiskHydrator), so it is by
+    // definition already flushed — prime both trackers so neither the first
+    // `docUpdate` nor a manual `flushAll()` re-writes and re-commits the same
+    // bytes. Whether that on-disk content was itself committed is not this
+    // service's concern: the next real edit will `git add` the whole file.
+    this.onDocHydrated = ({ docName, content }) => {
+      this.lastSeenContent.set(docName, content);
+      this.lastFlushedContent.set(docName, content);
+    };
+    this.server.on("docHydrated", this.onDocHydrated);
   }
 
   private scheduleFlush(docName: string): void {
@@ -197,5 +209,6 @@ export class DiskFlushService {
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
     this.server.off("docUpdate", this.onDocUpdate);
+    this.server.off("docHydrated", this.onDocHydrated);
   }
 }

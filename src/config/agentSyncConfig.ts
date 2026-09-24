@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { load } from "js-yaml";
 import type { ValidationOnFail } from "../validation/validationGateService.js";
+import type { SyncFileOpsOptions } from "../sync/syncFileOps.js";
 
 export type LineEndingStyle = "lf" | "crlf";
 export type SymbolIndexEnforcement = "advisory" | "blocking";
@@ -172,6 +173,39 @@ export function loadAgentSyncConfigFile(path: string): AgentSyncConfig {
 /** Loads `path` if it exists, otherwise returns the same defaults `agent-sync init` would write. */
 export function loadAgentSyncConfigOrDefault(path: string): AgentSyncConfig {
   return existsSync(path) ? loadAgentSyncConfigFile(path) : DEFAULT_CONFIG;
+}
+
+/** The explicit, in-code half of a `SyncFileOps` setup — what `McpSyncProxyOptions`/`MountOptions`/the hook bridge each accept alongside an optional parsed `.agent-sync.yml`. */
+export interface SyncFileOpsOverrides {
+  /** Sync server URL. Required when no `config` is given; otherwise overrides `config.server`. */
+  syncServerUrl?: string;
+  /** Replaces (does not merge with) `config.paths.exclusive` when given. */
+  exclusivePaths?: string[];
+  ownerId?: string;
+  lockLeaseMs?: number;
+}
+
+/**
+ * The one place `.agent-sync.yml` is turned into `SyncFileOps` options, so
+ * the MCP proxy, the FUSE mount, and the hook bridge all read `server` and
+ * `paths.exclusive` the same way rather than each open-coding it. Explicit
+ * overrides win over the config; the config wins over nothing (a missing
+ * `config` just means every field must come from `overrides`). A server URL
+ * from neither source is a hard error, not a guessed `localhost:4600` — that
+ * default belongs to `DEFAULT_CONFIG`, and a caller that wants it should pass
+ * `DEFAULT_CONFIG` (or `loadAgentSyncConfigOrDefault`'s result) explicitly.
+ */
+export function resolveSyncFileOpsOptions(config: AgentSyncConfig | undefined, overrides: SyncFileOpsOverrides = {}): SyncFileOpsOptions {
+  const serverUrl = overrides.syncServerUrl ?? config?.server;
+  if (!serverUrl) {
+    throw new Error(`no sync server URL: pass syncServerUrl explicitly or a parsed ${CONFIG_FILE_NAME} config with "server" set`);
+  }
+  return {
+    serverUrl,
+    exclusivePaths: overrides.exclusivePaths ?? config?.paths.exclusive ?? [],
+    ownerId: overrides.ownerId,
+    lockLeaseMs: overrides.lockLeaseMs,
+  };
 }
 
 /** Writes the default config to `path` — `agent-sync init`. Refuses to clobber an existing file unless `force`. */

@@ -8,6 +8,7 @@ import {
   loadAgentSyncConfigFile,
   loadAgentSyncConfigOrDefault,
   parseAgentSyncConfig,
+  resolveSyncFileOpsOptions,
   writeDefaultConfig,
 } from "../src/config/agentSyncConfig.js";
 
@@ -103,5 +104,45 @@ describe("Phase 7: config file read/write helpers", () => {
   it("loadAgentSyncConfigOrDefault falls back to defaults when the file doesn't exist", () => {
     const path = join(dir, "does-not-exist.yml");
     expect(loadAgentSyncConfigOrDefault(path)).toEqual(DEFAULT_CONFIG);
+  });
+});
+
+describe("resolveSyncFileOpsOptions — .agent-sync.yml → SyncFileOps options (Phase 7 wiring)", () => {
+  const config = parseAgentSyncConfig(`
+server: ws://sync.internal:5000
+paths:
+  exclusive: ["package.json"]
+`);
+
+  it("takes the server URL and exclusive paths from the config when nothing is overridden", () => {
+    expect(resolveSyncFileOpsOptions(config)).toEqual({
+      serverUrl: "ws://sync.internal:5000",
+      exclusivePaths: ["package.json"],
+      ownerId: undefined,
+      lockLeaseMs: undefined,
+    });
+  });
+
+  it("explicit overrides win over the config, and exclusivePaths replaces rather than merges", () => {
+    const resolved = resolveSyncFileOpsOptions(config, {
+      syncServerUrl: "ws://localhost:1",
+      exclusivePaths: ["src/schema.ts"],
+      ownerId: "agent-x",
+      lockLeaseMs: 500,
+    });
+    expect(resolved).toEqual({ serverUrl: "ws://localhost:1", exclusivePaths: ["src/schema.ts"], ownerId: "agent-x", lockLeaseMs: 500 });
+  });
+
+  it("works with no config at all when the URL is given explicitly (the pre-Phase-7 calling convention)", () => {
+    expect(resolveSyncFileOpsOptions(undefined, { syncServerUrl: "ws://localhost:2" })).toEqual({
+      serverUrl: "ws://localhost:2",
+      exclusivePaths: [],
+      ownerId: undefined,
+      lockLeaseMs: undefined,
+    });
+  });
+
+  it("refuses to guess a server URL when neither source provides one", () => {
+    expect(() => resolveSyncFileOpsOptions(undefined, {})).toThrow(/sync server URL/);
   });
 });

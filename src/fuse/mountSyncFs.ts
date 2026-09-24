@@ -1,10 +1,14 @@
 import { LockDeniedError, RangeMismatchError } from "../sync/syncFileOps.js";
+import { resolveSyncFileOpsOptions, type AgentSyncConfig } from "../config/agentSyncConfig.js";
 import { SyncFsOperations } from "./syncFsOperations.js";
 
 export interface MountOptions {
   mountPath: string;
-  serverUrl: string;
-  /** Phase 6: paths that go through the lock service instead of relying on CRDT merge alone — see `SyncFileOpsOptions.exclusivePaths`. */
+  /** A parsed `.agent-sync.yml` (Phase 7, Section 7) — supplies `server` and `paths.exclusive`. Explicit fields below override it; see `resolveSyncFileOpsOptions`. */
+  config?: AgentSyncConfig;
+  /** Sync server URL. Required unless `config` is given. */
+  serverUrl?: string;
+  /** Phase 6: paths that go through the lock service instead of relying on CRDT merge alone — see `SyncFileOpsOptions.exclusivePaths`. Replaces `config.paths.exclusive` when set. */
   exclusivePaths?: string[];
   /** Identifies this mount as a lock owner; see `SyncFileOpsOptions.ownerId`. */
   ownerId?: string;
@@ -32,12 +36,14 @@ function toErrno(err: unknown, Fuse: { EAGAIN: number; EBUSY: number; EIO: numbe
  */
 export async function mountSyncFs(options: MountOptions): Promise<() => Promise<void>> {
   const { default: Fuse } = await import("fuse-native");
-  const ops = new SyncFsOperations({
-    serverUrl: options.serverUrl,
-    exclusivePaths: options.exclusivePaths,
-    ownerId: options.ownerId,
-    lockLeaseMs: options.lockLeaseMs,
-  });
+  const ops = new SyncFsOperations(
+    resolveSyncFileOpsOptions(options.config, {
+      syncServerUrl: options.serverUrl,
+      exclusivePaths: options.exclusivePaths,
+      ownerId: options.ownerId,
+      lockLeaseMs: options.lockLeaseMs,
+    }),
+  );
   const stripLeadingSlash = (path: string) => path.replace(/^\//, "");
 
   const fuse = new Fuse(

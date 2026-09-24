@@ -55,6 +55,7 @@ function runServer(args: string[]): void {
     port: portFromServerUrl(config.server),
     repoRoot,
     flushDebounceMs: config.flush.debounceMs,
+    lineEndings: config.lineEndings,
     validation: config.validation,
   });
 }

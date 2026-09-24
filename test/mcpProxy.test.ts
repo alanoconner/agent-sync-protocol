@@ -7,6 +7,7 @@ import { SyncServer } from "../src/server/syncServer.js";
 import { SyncClient } from "../src/client/SyncClient.js";
 import { McpSyncProxy } from "../src/mcp/proxy.js";
 import { genericFilesystemPreset } from "../src/mcp/presets.js";
+import { parseAgentSyncConfig } from "../src/config/agentSyncConfig.js";
 
 /** A minimal fake "real" MCP filesystem server, backed by an in-memory `disk` Map — stands in for whatever server the proxy is actually fronting, so tests can assert mapped calls never reach it and unmapped calls do. */
 function createFakeFilesystemServer() {
@@ -190,5 +191,65 @@ describe("Phase 3: generic MCP proxy (Section 3.2)", () => {
 
     expect(result.isError).toBe(true);
     expect(textOf(result)).toMatch(/^EAGAIN:/);
+  });
+});
+
+describe("Phase 7 wiring: McpSyncProxy configured from .agent-sync.yml", () => {
+  let syncServer: SyncServer;
+  let syncServerUrl: string;
+  let proxy: McpSyncProxy;
+  let agentClient: Client;
+  const rawClients: SyncClient[] = [];
+
+  beforeEach(async () => {
+    syncServer = new SyncServer(0);
+    syncServerUrl = `ws://localhost:${syncServer.port}`;
+    const fakeUpstream = createFakeFilesystemServer();
+    // Everything the proxy needs to reach the sync layer comes from the
+    // parsed config — no syncServerUrl/exclusivePaths passed in code.
+    proxy = new McpSyncProxy({
+      serverInfo: { name: "agent-sync-proxy", version: "0.1.0" },
+      mapping: genericFilesystemPreset,
+      config: parseAgentSyncConfig(`server: ${syncServerUrl}\npaths:\n  exclusive: ["package.json"]\n`),
+      ownerId: "proxy-owner",
+    });
+
+    const [agentTransport, proxyServerTransport] = InMemoryTransport.createLinkedPair();
+    const [proxyUpstreamTransport, upstreamServerTransport] = InMemoryTransport.createLinkedPair();
+    await fakeUpstream.server.connect(upstreamServerTransport);
+    await proxy.connectUpstream(proxyUpstreamTransport);
+    await proxy.connectAgent(proxyServerTransport);
+    agentClient = new Client({ name: "test-agent", version: "1.0.0" });
+    await agentClient.connect(agentTransport);
+  });
+
+  afterEach(async () => {
+    await agentClient.close();
+    await proxy.close();
+    for (const client of rawClients.splice(0)) client.close();
+    await syncServer.close();
+  });
+
+  it("reaches the sync server named in the config", async () => {
+    const result = await agentClient.callTool({ name: "write_file", arguments: { path: "from-config.ts", content: "via config" } });
+    expect(result.isError).toBeFalsy();
+    await vi.waitFor(() => expect(syncServer.getDocContent("from-config.ts")).toBe("via config"));
+  });
+
+  it("routes paths.exclusive through the lock service: a write to a locked exclusive path comes back EBUSY", async () => {
+    const holder = new SyncClient({ serverUrl: syncServerUrl, docName: "package.json" });
+    rawClients.push(holder);
+    await holder.connect();
+    await holder.whenSynced();
+    expect((await holder.acquireLock("someone-else", 5000)).kind).toBe("granted");
+
+    const denied = await agentClient.callTool({ name: "write_file", arguments: { path: "package.json", content: "{}" } });
+    expect(denied.isError).toBe(true);
+    expect(textOf(denied as CallToolResult)).toMatch(/^EBUSY: /);
+    expect(syncServer.getDocContent("package.json")).toBe("");
+
+    // A non-exclusive path is untouched by the lock service even while that lease is held.
+    const ok = await agentClient.callTool({ name: "write_file", arguments: { path: "README.md", content: "fine" } });
+    expect(ok.isError).toBeFalsy();
   });
 });

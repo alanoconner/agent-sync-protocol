@@ -28,13 +28,22 @@
 // Wire it into a project's .claude/settings.json — see
 // claudeCodeHookSettings.example.json in this directory.
 //
-// Env vars: AGENT_SYNC_SERVER (default ws://localhost:4600),
-// AGENT_SYNC_EXCLUSIVE_PATHS (optional comma-separated relative paths that
-// go through the lock service instead of pure CRDT merge, Phase 6).
+// Configuration: the workspace's own .agent-sync.yml (Phase 7, Section 7) —
+// `server` and `paths.exclusive` — read the same way the MCP proxy and FUSE
+// mount read it (resolveSyncFileOpsOptions). Env vars AGENT_SYNC_SERVER and
+// AGENT_SYNC_EXCLUSIVE_PATHS (comma-separated relative paths) still work as
+// per-hook overrides of those two fields, for setups without a config file.
+//
+// The sync server MUST be running with a repo root (AGENT_SYNC_REPO_ROOT, or
+// `agent-sync server --repo-root`): that's what hydrates a brand-new room
+// from the working tree on first touch. Against a server with no repo root,
+// every room starts empty, and the Pre hook would faithfully overwrite an
+// existing local file with that emptiness.
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { CONFIG_FILE_NAME, loadAgentSyncConfigOrDefault, resolveSyncFileOpsOptions } from "../src/config/agentSyncConfig.js";
 import { SyncFileOps } from "../src/sync/syncFileOps.js";
 
 interface HookInput {
@@ -71,36 +80,24 @@ function toDocName(workspaceRoot: string, filePath: string): string | null {
   return rel.split(sep).join("/");
 }
 
-function makeOps(ownerId: string): SyncFileOps {
-  const serverUrl = process.env.AGENT_SYNC_SERVER ?? "ws://localhost:4600";
-  const exclusivePaths = (process.env.AGENT_SYNC_EXCLUSIVE_PATHS ?? "")
-    .split(",")
-    .map((p) => p.trim())
-    .filter(Boolean);
-  return new SyncFileOps({ serverUrl, exclusivePaths, ownerId });
+function makeOps(ownerId: string, workspaceRoot: string): SyncFileOps {
+  const config = loadAgentSyncConfigOrDefault(join(workspaceRoot, CONFIG_FILE_NAME));
+  const envExclusive = process.env.AGENT_SYNC_EXCLUSIVE_PATHS;
+  return new SyncFileOps(
+    resolveSyncFileOpsOptions(config, {
+      syncServerUrl: process.env.AGENT_SYNC_SERVER,
+      exclusivePaths: envExclusive === undefined ? undefined : envExclusive.split(",").map((p) => p.trim()).filter(Boolean),
+      ownerId,
+    }),
+  );
 }
 
 async function runPre(ops: SyncFileOps, docName: string, filePath: string): Promise<void> {
+  // A room being created right now is seeded by the server from its repo
+  // root's working tree (createDiskHydrator) before this read resolves, so
+  // an existing file comes back as itself, not as an empty doc — no
+  // client-side "is the room empty but disk isn't?" guesswork needed here.
   const remoteContent = await ops.readFile(docName);
-
-  // A brand-new CRDT room always starts empty — there's no disk→doc
-  // hydration in this codebase yet (Phase 4's DiskFlushService only flushes
-  // the other direction). Without this check, the first agent to touch an
-  // already-existing file would pull that empty room and overwrite real
-  // local content with nothing. Heuristic, not a real fix: if the room is
-  // empty but local disk already has content, assume this is that first
-  // touch and seed the shared doc from disk instead of wiping it. This can't
-  // distinguish "never synced yet" from "someone legitimately emptied the
-  // file" — acceptable for this example bridge, not something to rely on
-  // for an actual disk-hydration guarantee.
-  const localContent = existsSync(filePath) ? readFileSync(filePath, "utf8") : null;
-  if (remoteContent === "" && localContent) {
-    await ops.writeFileFull(docName, localContent);
-    const seeded = await ops.readFile(docName);
-    writeFileSync(filePath, seeded, "utf8");
-    stashSnapshot(docName, seeded);
-    return;
-  }
 
   mkdirSync(dirname(filePath), { recursive: true });
   writeFileSync(filePath, remoteContent, "utf8");
@@ -181,7 +178,7 @@ async function main(): Promise<void> {
   if (input.tool_name === "Bash") {
     const command = input.tool_input?.command;
     if (typeof command !== "string") return;
-    const ops = makeOps(input.session_id ?? workspaceRoot);
+    const ops = makeOps(input.session_id ?? workspaceRoot, workspaceRoot);
     try {
       if (mode === "pre") {
         await runPreBash(ops, workspaceRoot, command);
@@ -201,7 +198,7 @@ async function main(): Promise<void> {
   const docName = toDocName(workspaceRoot, filePath);
   if (docName === null) return;
 
-  const ops = makeOps(input.session_id ?? workspaceRoot);
+  const ops = makeOps(input.session_id ?? workspaceRoot, workspaceRoot);
   try {
     if (mode === "pre") {
       await runPre(ops, docName, filePath);

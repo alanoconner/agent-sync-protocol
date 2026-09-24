@@ -3,14 +3,18 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { SyncFileOps } from "../sync/syncFileOps.js";
+import { resolveSyncFileOpsOptions, type AgentSyncConfig } from "../config/agentSyncConfig.js";
 import type { MappingConfig, ReadMapping, WriteMapping } from "./mappingConfig.js";
 
 export interface McpSyncProxyOptions {
   /** Name/version this proxy presents both as an MCP server (to the agent) and MCP client (to the upstream server). */
   serverInfo: { name: string; version: string };
   mapping: MappingConfig;
-  syncServerUrl: string;
-  /** Phase 6: paths that go through the lock service instead of relying on CRDT merge alone — see `SyncFileOpsOptions.exclusivePaths`. */
+  /** A parsed `.agent-sync.yml` (Phase 7, Section 7) — supplies `server` (the sync server URL) and `paths.exclusive`. Every explicit field below overrides its config counterpart; see `resolveSyncFileOpsOptions`. */
+  config?: AgentSyncConfig;
+  /** Sync server URL. Required unless `config` is given. */
+  syncServerUrl?: string;
+  /** Phase 6: paths that go through the lock service instead of relying on CRDT merge alone — see `SyncFileOpsOptions.exclusivePaths`. Replaces `config.paths.exclusive` when set. */
   exclusivePaths?: string[];
   /** Identifies this proxy instance as a lock owner; see `SyncFileOpsOptions.ownerId`. */
   ownerId?: string;
@@ -36,12 +40,14 @@ export class McpSyncProxy {
   constructor(options: McpSyncProxyOptions) {
     this.upstream = new Client({ name: `${options.serverInfo.name}-upstream-client`, version: options.serverInfo.version });
     this.server = new Server(options.serverInfo, { capabilities: { tools: {} } });
-    this.ops = new SyncFileOps({
-      serverUrl: options.syncServerUrl,
-      exclusivePaths: options.exclusivePaths,
-      ownerId: options.ownerId,
-      lockLeaseMs: options.lockLeaseMs,
-    });
+    this.ops = new SyncFileOps(
+      resolveSyncFileOpsOptions(options.config, {
+        syncServerUrl: options.syncServerUrl,
+        exclusivePaths: options.exclusivePaths,
+        ownerId: options.ownerId,
+        lockLeaseMs: options.lockLeaseMs,
+      }),
+    );
 
     for (const mapping of options.mapping.mappings) {
       if (mapping.op === "write") this.writeMappings.set(mapping.tool, mapping);

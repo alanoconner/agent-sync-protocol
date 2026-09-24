@@ -66,13 +66,36 @@ export interface ServerStatus {
   rooms: RoomStatus[];
 }
 
+/** Emitted once per room, immediately after `hydrate` seeded it with non-empty initial content — before any client has been greeted, so it never overlaps with a `docUpdate`. */
+export interface DocHydratedEvent {
+  docName: string;
+  content: string;
+}
+
+export interface SyncServerOptions {
+  /**
+   * Initial content for a room that's being created for the first time —
+   * `undefined` (or an empty string) means "start empty," which is what every
+   * room did before this hook existed. Called exactly once per room, on
+   * creation, synchronously and *before* the first client is greeted, so a
+   * connecting client's sync-step-1 exchange already carries the seeded
+   * content rather than racing against it. The server still has no idea what
+   * a doc name means — `createDiskHydrator` (src/flush/diskHydration.ts) is
+   * what treats it as a path under a repo root, from outside this class.
+   */
+  hydrate?: (docName: string) => string | undefined;
+}
+
 export class SyncServer extends Observable<string> {
   private readonly rooms = new Map<string, Room>();
   private readonly httpServer: HttpServer;
   private readonly wss: WebSocketServer;
 
-  constructor(port: number) {
+  private readonly hydrate: SyncServerOptions["hydrate"];
+
+  constructor(port: number, options: SyncServerOptions = {}) {
     super();
+    this.hydrate = options.hydrate;
     // A plain HTTP server (rather than the ws-managed standalone server
     // `new WebSocketServer({ port })` creates internally) so a non-upgrade
     // GET can be answered directly on the same port — Phase 7's "basic
@@ -106,6 +129,17 @@ export class SyncServer extends Observable<string> {
 
       room = { doc, awareness, clients: new Map(), lock: null };
       this.rooms.set(name, room);
+
+      // Seed before the "update" handler below is attached: nobody is
+      // connected to a room that's being created right now, so there's no
+      // one to broadcast to, and a `docUpdate` for content that by
+      // definition is already on disk would only make DiskFlushService
+      // schedule a pointless no-op flush. `docHydrated` tells it instead.
+      const initial = this.hydrate?.(name);
+      if (initial) {
+        doc.getText("content").insert(0, initial);
+        this.emit("docHydrated", [{ docName: name, content: initial } satisfies DocHydratedEvent]);
+      }
 
       doc.on("update", (update: Uint8Array, origin: unknown) => {
         const encoder = encoding.createEncoder();
