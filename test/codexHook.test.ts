@@ -1,0 +1,122 @@
+import { execFile, execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createDiskHydrator } from "../src/flush/diskHydration.js";
+import { SyncServer } from "../src/server/syncServer.js";
+
+const TSX = join(process.cwd(), "node_modules", ".bin", "tsx");
+const HOOK = join(process.cwd(), "examples", "codexHook.ts");
+const ORIGINAL = "const A = 1;\nconst HEADER = 34;\nconst B = 2;\n";
+
+function runHook(
+  mode: "pre" | "post",
+  workspace: string,
+  serverUrl: string,
+  toolUseId: string,
+  session: string,
+  toolName: "apply_patch" | "Bash" = "apply_patch",
+  command = "*** Begin Patch\n*** Update File: src/app.js\n*** End Patch",
+) {
+  return new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
+    const child = execFile(
+      TSX,
+      [HOOK, mode],
+      { cwd: workspace, env: { ...process.env, AGENT_SYNC_SERVER: serverUrl } },
+      (error, stdout, stderr) =>
+        resolve({ code: error ? ((error as { code?: number }).code ?? 1) : 0, stdout, stderr }),
+    );
+    child.stdin?.end(
+      JSON.stringify({
+        session_id: session,
+        tool_use_id: toolUseId,
+        cwd: workspace,
+        tool_name: toolName,
+        tool_input: { command },
+      }),
+    );
+  });
+}
+
+describe("Codex hook bridge", () => {
+  let server: SyncServer;
+  let canonical: string;
+  let a: string;
+  let b: string;
+  let url: string;
+
+  const makeWorkspace = () => {
+    const directory = realpathSync(mkdtempSync(join(tmpdir(), "asp-codex-hook-")));
+    execFileSync("git", ["init", "-q", directory]);
+    mkdirSync(join(directory, "src"), { recursive: true });
+    writeFileSync(join(directory, "src", "app.js"), ORIGINAL);
+    return directory;
+  };
+
+  beforeEach(() => {
+    canonical = makeWorkspace();
+    a = makeWorkspace();
+    b = makeWorkspace();
+    server = new SyncServer(0, { hydrate: createDiskHydrator(canonical) });
+    url = `ws://localhost:${server.port}`;
+  });
+
+  afterEach(async () => {
+    await server.close();
+    for (const directory of [canonical, a, b]) rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("syncs apply_patch changes and rejects a stale conflicting patch", async () => {
+    expect((await runHook("pre", a, url, "a1", "sa")).code).toBe(0);
+    writeFileSync(join(a, "src", "app.js"), ORIGINAL.replace("HEADER = 34", "HEADER = 20"));
+    expect((await runHook("post", a, url, "a1", "sa")).code).toBe(0);
+    expect(server.getDocContent("src/app.js")).toContain("HEADER = 20");
+
+    expect((await runHook("pre", b, url, "b1", "sb")).code).toBe(0);
+    expect(readFileSync(join(b, "src", "app.js"), "utf8")).toContain("HEADER = 20");
+
+    expect((await runHook("pre", a, url, "a2", "sa")).code).toBe(0);
+    writeFileSync(
+      join(a, "src", "app.js"),
+      readFileSync(join(a, "src", "app.js"), "utf8").replace("HEADER = 20", "HEADER = 21"),
+    );
+    expect((await runHook("post", a, url, "a2", "sa")).code).toBe(0);
+
+    writeFileSync(
+      join(b, "src", "app.js"),
+      readFileSync(join(b, "src", "app.js"), "utf8").replace("HEADER = 20", "HEADER = 15"),
+    );
+    const rejected = await runHook("post", b, url, "b1", "sb");
+    expect(rejected.code).toBe(2);
+    expect(rejected.stderr).toContain("src/app.js");
+    expect(server.getDocContent("src/app.js")).toContain("HEADER = 21");
+    expect(readFileSync(join(b, "src", "app.js"), "utf8")).toContain("HEADER = 21");
+  }, 90_000);
+
+  it("syncs new files but excludes Codex hook configuration", async () => {
+    mkdirSync(join(a, ".codex"), { recursive: true });
+    writeFileSync(join(a, ".codex", "hooks.json"), "{}");
+    expect((await runHook("pre", a, url, "a1", "sa")).code).toBe(0);
+    writeFileSync(join(a, "src", "made.js"), "made();\n");
+    writeFileSync(join(a, ".codex", "hooks.json"), "{\"changed\":true}");
+    expect((await runHook("post", a, url, "a1", "sa")).code).toBe(0);
+    expect(server.getDocNames()).toEqual(["src/made.js"]);
+    expect(server.getDocContent("src/made.js")).toBe("made();\n");
+  }, 60_000);
+
+  it("blocks apply_patch deletion before it can diverge from shared state", async () => {
+    const result = await runHook(
+      "pre",
+      a,
+      url,
+      "a1",
+      "sa",
+      "apply_patch",
+      "*** Begin Patch\n*** Delete File: src/app.js\n*** End Patch",
+    );
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("file deletion is not supported");
+    expect(readFileSync(join(a, "src", "app.js"), "utf8")).toBe(ORIGINAL);
+  });
+});

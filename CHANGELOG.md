@@ -2,6 +2,14 @@
 
 Tracks progress against the build order in [agent-sync-dev-spec.md](agent-sync-dev-spec.md) Section 10. Entries are grouped by phase, in build order, not by date. See `CLAUDE.md` for the architectural detail behind each item — this file is a progress record, not a design doc.
 
+## Phase 3 addendum — Codex hook adapter
+
+- Added `examples/codexHook.ts`, a Codex-native `PreToolUse`/`PostToolUse` bridge for canonical `apply_patch` and `Bash` events. Both paths pull active rooms and use the command-agnostic workspace snapshot/diff flow, then publish changes through `writeFileFromSnapshot` so stale overlapping edits are rejected and reverted rather than guessed.
+- Added `examples/codexHookSettings.example.json` for `.codex/hooks.json`. The adapter consumes Codex's matching `session_id`/`tool_use_id` pair, reads `.agent-sync.yml`, and supports the same environment overrides as the Claude Code bridge.
+- `apply_patch` file deletions fail closed during `PreToolUse`, because the protocol has no delete/tombstone operation and allowing the patch would silently split the local worktree from shared state. `.codex/` joins `.claude/` in the workspace scanner's always-excluded hook configuration paths.
+- Added `test/codexHook.test.ts` for successful patch synchronization, a stale same-span conflict and local revert, new-file handling, `.codex` exclusion, and deletion denial.
+- Verified with the TypeScript build and 141 tests across 24 files.
+
 ## Reliability fixes — hooks, persistence, transport, and FUSE
 
 - Isolate hook snapshots by workspace, session, tool-call ID, and document path; do not store snapshots for read-only hooks.

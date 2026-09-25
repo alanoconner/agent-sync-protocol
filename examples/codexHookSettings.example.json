@@ -1,0 +1,29 @@
+{
+  "description": "Route Codex apply_patch and shell writes through agent-sync.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(apply_patch|Bash)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AGENT_SYNC_SERVER=ws://localhost:4600 /absolute/path/to/agent-sync-protocol/node_modules/.bin/tsx /absolute/path/to/agent-sync-protocol/examples/codexHook.ts pre",
+            "statusMessage": "Refreshing shared workspace state"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(apply_patch|Bash)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AGENT_SYNC_SERVER=ws://localhost:4600 /absolute/path/to/agent-sync-protocol/node_modules/.bin/tsx /absolute/path/to/agent-sync-protocol/examples/codexHook.ts post",
+            "statusMessage": "Publishing workspace changes"
+          }
+        ]
+      }
+    ]
+  }
+}

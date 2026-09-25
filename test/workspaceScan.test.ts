@@ -38,11 +38,12 @@ describe("WorkspaceScanner", () => {
     rmSync(store, { recursive: true, force: true });
   });
 
-  it("lists tracked + untracked files but not gitignored, .claude, node_modules, or the sync config", () => {
+  it("lists tracked + untracked files but not gitignored, hook settings, node_modules, or the sync config", () => {
     write(".gitignore", "build/\n");
     write("src/a.js", "a");
     write("build/out.js", "x");
     write(".claude/settings.json", "{}");
+    write(".codex/hooks.json", "{}");
     write(".agent-sync.yml", "server: x");
     write("client/node_modules/pkg/i.js", "x");
     expect(scanner().listFiles().sort()).toEqual([".gitignore", "src/a.js"]);

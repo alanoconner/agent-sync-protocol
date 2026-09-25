@@ -41,10 +41,16 @@ export const MAX_CHANGES_PER_CALL = 200;
 const OBJECT_MIN_AGE_MS = 10 * 60 * 1000;
 const RUN_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
-/** Never synced: VCS internals, this bridge's own settings, dependency trees, and the sync config itself. */
+/** Never synced: VCS internals, either hook host's settings, dependency trees, and the sync config itself. */
 function isAlwaysExcluded(rel: string): boolean {
   const segments = rel.split("/");
-  return segments.includes(".git") || segments.includes("node_modules") || segments[0] === ".claude" || rel === ".agent-sync.yml";
+  return (
+    segments.includes(".git") ||
+    segments.includes("node_modules") ||
+    segments[0] === ".claude" ||
+    segments[0] === ".codex" ||
+    rel === ".agent-sync.yml"
+  );
 }
 
 /** `paths.ignore` entries: `*` (within a segment), `**` (across segments), `?`; a bare `dist` also matches everything under it. */

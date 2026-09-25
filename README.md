@@ -102,7 +102,8 @@ Three interception mechanisms exist today, per spec Section 3 — pick based on 
 | Agent shape | Mechanism | Where |
 |---|---|---|
 | Exposes file ops as MCP tools | Generic MCP proxy | `src/mcp/` — see `examples/agent-sync-mcp-map.example.yml` |
-| CLI agent with a pre/post-tool hook API (Claude Code, Codex) | Hook bridge | `examples/claudeCodeHook.ts` |
+| Claude Code CLI | Hook bridge | `examples/claudeCodeHook.ts` + `examples/claudeCodeHookSettings.example.json` |
+| Codex CLI/app | Hook bridge | `examples/codexHook.ts` + `examples/codexHookSettings.example.json` |
 | CLI agent with no hook API and no rebindable registry | FUSE/WinFsp mount | `src/fuse/` (single-file merge only — no `readdir`/`mkdir`/`rename` yet, needs macFUSE installed) |
 
 ### Testing with real Claude Code agents (hook bridge)
@@ -134,6 +135,17 @@ Each flush commits only its target path, leaving unrelated staged changes staged
 - A rejected `Edit`/`Write` (concurrent edit, lock held, failed validation) reverts the local file and surfaces the error to the agent — expected behavior, not a failure.
 - A `Bash` call is covered by diffing the workspace before and after it (git-tracked plus untracked-but-not-ignored files, minus `paths.ignore`), so it works however the command changes a file — `sed`, a script, a formatter. What it cannot see: file deletions, binary or >1 MB files, and changes made by a process that keeps running after the command returns. Full coverage of those needs the FUSE mount instead.
 - A room is hydrated from the server's repo root once, when it's first created. A file changed on disk behind the server's back after that (a manual `git pull` in the canonical checkout, say) is not picked up until the server restarts — the room is the source of truth once it exists.
+
+### Testing with Codex agents
+
+The Codex adapter uses the same worktree and server layout as the Claude Code bridge above, but observes Codex's canonical `apply_patch` and `Bash` hook events:
+
+1. Start the server with the canonical checkout as its repo root.
+2. In each Codex worktree, copy [examples/codexHookSettings.example.json](examples/codexHookSettings.example.json) to `.codex/hooks.json` and replace the two absolute paths.
+3. Start Codex in that worktree, open `/hooks`, and trust the project hook definition.
+4. Use Codex normally. Before each `apply_patch` or shell call, the hook pulls active rooms and snapshots the workspace; afterward it pushes changed and new text files through exact-match-or-reject synchronization.
+
+The adapter reads `.agent-sync.yml` and honors the same `AGENT_SYNC_SERVER` and `AGENT_SYNC_EXCLUSIVE_PATHS` overrides as the Claude bridge. Codex `apply_patch` deletions are blocked before execution because the current protocol has no file tombstone/delete operation. Shell-command deletions, binary files or files over 1 MB, changes from processes that outlive the command, and calls on specialized tool paths that bypass Codex hooks are not synchronized. Hook configuration under `.codex/` is always excluded from workspace scanning.
 
 ## Testing this project itself
 
