@@ -140,10 +140,10 @@ Each flush commits only its target path, leaving unrelated staged changes staged
 
 The Codex adapter uses the same worktree and server layout as the Claude Code bridge above, but observes Codex's canonical `apply_patch` and `Bash` hook events:
 
-1. Start the server with the canonical checkout as its repo root.
-2. In each Codex worktree, copy [examples/codexHookSettings.example.json](examples/codexHookSettings.example.json) to `.codex/hooks.json` and replace the two absolute paths.
-3. Start Codex in that worktree, open `/hooks`, and trust the project hook definition.
-4. Use Codex normally. Before each `apply_patch` or shell call, the hook pulls active rooms and snapshots the workspace; afterward it pushes changed and new text files through exact-match-or-reject synchronization.
+1. In the canonical (main) checkout, copy [examples/codexHookSettings.example.json](examples/codexHookSettings.example.json) to `.codex/hooks.json` and replace the two absolute paths. Codex resolves project hooks for linked Git worktrees from this main worktree, so a copy that exists only inside a linked worktree is not loaded.
+2. Start the server with the canonical checkout as its repo root.
+3. Start Codex in each linked worktree, open `/hooks`, and trust the canonical project hook definition.
+4. Use Codex normally. Before each `apply_patch` or shell call, the hook pulls active rooms and snapshots that agent's worktree; afterward it pushes changed and new text files through exact-match-or-reject synchronization.
 
 The adapter reads `.agent-sync.yml` and honors the same `AGENT_SYNC_SERVER` and `AGENT_SYNC_EXCLUSIVE_PATHS` overrides as the Claude bridge. Codex `apply_patch` deletions are blocked before execution because the current protocol has no file tombstone/delete operation. Shell-command deletions, binary files or files over 1 MB, changes from processes that outlive the command, and calls on specialized tool paths that bypass Codex hooks are not synchronized. Hook configuration under `.codex/` is always excluded from workspace scanning.
 

@@ -11,10 +11,12 @@
 // Post diffs the workspace and pushes each changed/new file through
 // writeFileFromSnapshot's exact-match-or-reject path.
 //
-// Put examples/codexHookSettings.example.json at <repo>/.codex/hooks.json,
-// replace the absolute paths, then review/trust it with Codex's /hooks command.
-// The sync server MUST be running with a repo root so first-touch rooms hydrate
-// from the canonical working tree.
+// Put examples/codexHookSettings.example.json at the canonical/main checkout's
+// <repo>/.codex/hooks.json, replace the absolute paths, then review/trust it
+// with Codex's /hooks command. For linked Git worktrees, Codex discovers the
+// project hook from that main worktree rather than a copy that exists only in
+// the linked worktree. The sync server MUST be running with a repo root so
+// first-touch rooms hydrate from the canonical working tree.
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
