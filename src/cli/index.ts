@@ -32,7 +32,7 @@ Commands:
   claude [options] [-- args] Start Claude Code in a managed synchronized worktree
   status [--json]            Show the current repository session
   stop                       Flush and pause the current session
-  finish                     Flush, validate, and prepare a safe Git handoff
+  finish                     Flush, validate, and prepare an uncommitted merge
   clean                      Remove safe managed worktrees; retain integration branch
   init [--force]             Write a default ${CONFIG_FILE_NAME}
   server [options]           Start a standalone sync server
@@ -210,12 +210,20 @@ async function runStop(): Promise<void> {
 async function runFinish(): Promise<void> {
   const repo = discoverRepository(process.cwd(), false);
   const stateDir = repositoryStateDir(repo);
-  const session = await finishSession(stateDir);
-  console.log(`ASL session ${session.sessionId} finished. The original branch was not changed.`);
-  console.log("Handoff options:");
-  console.log(`  git -C ${quote(session.repoRoot)} merge --ff-only ${quote(session.integrationBranch)}`);
-  console.log(`  git -C ${quote(session.repoRoot)} merge ${quote(session.integrationBranch)}`);
-  console.log(`  git -C ${quote(session.repoRoot)} cherry-pick ${quote(`${session.baseCommit}..${session.integrationBranch}`)}`);
+  const { session, mergePrepared, integrationCommitCount } = await finishSession(stateDir);
+  if (integrationCommitCount > 1) {
+    console.log(`ASL compacted ${integrationCommitCount} integration flush commits into one commit.`);
+  }
+  if (!mergePrepared) {
+    console.log(`ASL session ${session.sessionId} finished. The integration branch contains no new commits.`);
+    return;
+  }
+  console.log(`ASL session ${session.sessionId} finished. Integration changes are staged on ${session.baseBranch}; no commit was created.`);
+  console.log("Review or complete the pending merge:");
+  console.log(`  git -C ${quote(session.repoRoot)} status`);
+  console.log(`  git -C ${quote(session.repoRoot)} diff --cached`);
+  console.log(`  git -C ${quote(session.repoRoot)} commit`);
+  console.log(`  git -C ${quote(session.repoRoot)} merge --abort`);
 }
 
 async function runClean(): Promise<void> {

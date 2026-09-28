@@ -23,7 +23,7 @@ This exposes both `asl` and `agent-sync`. Published packages, standalone binarie
 | `asl claude [options] [-- claude-args]` | Start Claude Code in a new managed worktree. |
 | `asl status [--json]` | Show the current repository session. |
 | `asl stop` | Flush and pause a session while retaining its worktrees. |
-| `asl finish` | Flush, validate, stop, and print safe Git handoff commands. |
+| `asl finish` | Flush, validate, stop, and prepare an uncommitted merge in the original checkout. |
 | `asl clean` | Remove safe managed worktrees and agent branches. |
 | `asl init [--force]` | Write the default `.agent-sync.yml`. |
 | `asl server [options]` | Run a standalone config-driven sync server. |
@@ -94,7 +94,7 @@ Status values are:
 
 - `active`: the session can launch agents and normally has a daemon.
 - `paused`: `asl stop` completed; launching another agent resumes it.
-- `finished`: final flush and validation completed; run `asl clean` before starting a new session.
+- `finished`: final flush, validation, and merge preparation completed; run `asl clean` before starting a new session.
 
 ## `asl stop`
 
@@ -112,16 +112,19 @@ Launching `asl codex` or `asl claude` again resumes a paused session, restarts t
 asl finish
 ```
 
-Performs the final handoff without changing the original checkout:
+Performs the final handoff by preparing an uncommitted merge in the original checkout:
 
 1. Refuses to continue while an ASL-launched agent is still running.
-2. Starts the daemon if necessary and flushes every CRDT room.
-3. Runs the configured final validation command, if any.
-4. Requires the integration worktree to be clean after its flush commits.
-5. Stops the daemon and marks the session finished.
-6. Prints `git merge --ff-only`, regular `git merge`, and `git cherry-pick` alternatives.
+2. Requires the original checkout to be clean, on the recorded base branch and commit, and free of another Git operation.
+3. Starts the daemon if necessary and flushes every CRDT room.
+4. Runs the configured final validation command, if any.
+5. Requires the integration worktree to be clean after its flush commits, then stops the daemon.
+6. Replaces multiple per-file flush commits with one `agent-sync: synchronized changes` commit whose tree exactly matches the validated integration tip.
+7. Runs `git merge --no-ff --no-commit <integration-branch>` in the original checkout and marks the session finished only if it succeeds.
 
-Review and run one of the printed Git commands yourself. `finish` never performs the merge or cherry-pick.
+The original branch ref remains unchanged, while the merged files are staged and `MERGE_HEAD` records the integration tip. Review with `git status` and `git diff --cached`, then run `git commit` to complete the merge or `git merge --abort` to restore the original checkout. If the integration branch has no new commits, `finish` completes without creating merge state.
+
+The daemon's CRDT flushes create granular commits on the isolated integration branch during active work so successfully flushed state remains recoverable. When more than one such commit exists, `finish` rewrites the ASL-owned integration branch to a single consolidated commit after validation and shutdown. It does not create the final commit on the real project branch. If compaction or merge preparation unexpectedly fails after daemon shutdown, the session is marked paused and the error directs you to inspect or abort the Git merge before retrying.
 
 ## `asl clean`
 
@@ -129,7 +132,7 @@ Review and run one of the printed Git commands yourself. `finish` never performs
 asl clean
 ```
 
-Removes managed agent worktrees and their agent branches, then removes the integration worktree. The integration branch is deliberately retained as the durable handoff result.
+Removes managed agent worktrees and their agent branches, then removes the integration worktree. The integration branch is deliberately retained as the durable handoff result, including while the original checkout has the pending merge prepared by `asl finish`.
 
 Cleanup is allowed only after `stop` or `finish`. For each agent worktree, ASL compares uncommitted and branch-level changed paths with the integration worktree. If any content is absent or different in integration, cleanup refuses rather than deleting it. The repository's command-trust record is retained for later sessions.
 

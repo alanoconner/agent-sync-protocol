@@ -60,6 +60,7 @@ describe("ASL CLI managed lifecycle", () => {
       daemon: { running: boolean; serverUrl: string };
       agents: { status: string; worktree: string }[];
       integrationBranch: string;
+      baseCommit: string;
     };
     expect(status.status).toBe("active");
     expect(status.daemon.running).toBe(true);
@@ -79,12 +80,33 @@ describe("ASL CLI managed lifecycle", () => {
     writeFileSync(readme, "fixture\nsynchronized\n");
     command(agentWorktree, state, ["_hook", "claude", "post"], hookInput, hookEnv);
 
-    expect(command(repo, state, ["finish"])).toContain("original branch was not changed");
+    const second = join(agentWorktree, "SECOND.md");
+    const secondHookInput = JSON.stringify({
+      session_id: "cli-test",
+      tool_use_id: "write-2",
+      cwd: agentWorktree,
+      tool_name: "Write",
+      tool_input: { file_path: second },
+    });
+    command(agentWorktree, state, ["_hook", "claude", "pre"], secondHookInput, hookEnv);
+    writeFileSync(second, "second synchronized file\n");
+    command(agentWorktree, state, ["_hook", "claude", "post"], secondHookInput, hookEnv);
+
+    const baseHead = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const finishOutput = command(repo, state, ["finish"]);
+    expect(finishOutput).toContain("compacted 2 integration flush commits into one commit");
+    expect(finishOutput).toContain("no commit was created");
     expect(execFileSync("git", ["-C", repo, "show", `${status.integrationBranch}:README.md`], { encoding: "utf8" }))
       .toBe("fixture\nsynchronized\n");
-    expect(readFileSync(join(repo, "README.md"), "utf8")).toBe("fixture\n");
+    expect(readFileSync(join(repo, "README.md"), "utf8")).toBe("fixture\nsynchronized\n");
+    expect(readFileSync(join(repo, "SECOND.md"), "utf8")).toBe("second synchronized file\n");
+    expect(execFileSync("git", ["-C", repo, "rev-list", "--count", `${status.baseCommit}..${status.integrationBranch}`], { encoding: "utf8" }).trim()).toBe("1");
+    expect(execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()).toBe(baseHead);
+    expect(execFileSync("git", ["-C", repo, "rev-parse", "MERGE_HEAD"], { encoding: "utf8" }).trim())
+      .toBe(execFileSync("git", ["-C", repo, "rev-parse", status.integrationBranch], { encoding: "utf8" }).trim());
+    expect(execFileSync("git", ["-C", repo, "diff", "--cached", "--name-only"], { encoding: "utf8" })).toBe("README.md\nSECOND.md\n");
     expect(command(repo, state, ["clean"])).toContain("Integration branch retained");
-    expect(execFileSync("git", ["-C", repo, "status", "--porcelain"], { encoding: "utf8" })).toBe("");
+    expect(execFileSync("git", ["-C", repo, "status", "--porcelain"], { encoding: "utf8" })).toBe("M  README.md\nA  SECOND.md\n");
     expect(execFileSync("git", ["-C", repo, "branch", "--list", status.integrationBranch], { encoding: "utf8" })).toContain(status.integrationBranch);
   }, 60_000);
 });

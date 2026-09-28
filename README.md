@@ -33,11 +33,11 @@ On first use, ASL shows any repository-defined setup or validation command befor
 
 ```bash
 asl status       # inspect the session, daemon, worktrees, and agents
-asl finish       # flush CRDT state, validate it, stop the daemon, print Git handoff commands
+asl finish       # flush, validate, and stage an uncommitted merge on the original branch
 asl clean        # remove safe agent worktrees/branches; retain the integration branch
 ```
 
-`asl finish` never merges into your current branch. Review the printed merge or cherry-pick command, then run it yourself. Use `asl stop` instead when you want to flush and pause while retaining all managed worktrees.
+`asl finish` keeps granular flush commits for recovery while agents work, then compacts them into one integration commit and prepares a real `--no-ff --no-commit` merge in the original checkout. Review the staged result, then either commit it or run `git merge --abort`. It refuses to proceed if that checkout is dirty, is no longer on the session's original branch and commit, or has another Git operation in progress. Use `asl stop` instead when you want to flush and pause while retaining all managed worktrees.
 
 ## Core demo — see two clients converge
 
@@ -123,7 +123,7 @@ asl claude [options] [-- agent args]  # launch Claude Code the same way
   --yes                               #   accept displayed first-use repo commands noninteractively
 asl status [--json]                   # inspect the current repository session
 asl stop                              # flush, stop the daemon, retain worktrees
-asl finish                            # flush, validate, stop, and print safe Git handoff commands
+asl finish                            # flush, validate, stop, and prepare an uncommitted merge
 asl clean                             # remove safe worktrees; retain the integration branch
 asl init                              # write .agent-sync.yml (--force to overwrite)
 asl server                            # start the server from .agent-sync.yml
@@ -144,7 +144,7 @@ During development, run any of these straight from source with `npm run cli -- <
 - A detached loopback-only Yjs daemon with authenticated lifecycle control and known-room recovery.
 - Compiled Codex and Claude Code hooks, injected automatically without copying hook files or exporting variables.
 - Lockfile-based dependency setup plus explicit trust for repository-defined setup and validation commands.
-- Safe pause, finalization, Git handoff, and cleanup commands that preserve the integration branch and refuse known data-loss cases.
+- Safe pause, compacted integration history, uncommitted final merge, and cleanup commands that preserve the integration branch and refuse known data-loss cases.
 
 ## Connecting a real agent
 

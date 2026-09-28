@@ -27,6 +27,12 @@ export interface LaunchOptions {
   skipSetup?: boolean;
 }
 
+export interface FinishResult {
+  session: SessionManifest;
+  mergePrepared: boolean;
+  integrationCommitCount: number;
+}
+
 function removeWorktree(repoRoot: string, worktree: string, branch: string): void {
   try { gitCommand(repoRoot, ["worktree", "remove", "--force", worktree]); } catch { /* best effort rollback */ }
   try { gitCommand(repoRoot, ["branch", "-D", branch]); } catch { /* branch may not exist */ }
@@ -191,13 +197,103 @@ export async function stopSession(stateDir: string): Promise<SessionManifest> {
   return session;
 }
 
-export async function finishSession(stateDir: string): Promise<SessionManifest> {
+function gitOperationInProgress(repoRoot: string): string | undefined {
+  const markers = [
+    ["MERGE_HEAD", "merge"],
+    ["rebase-merge", "rebase"],
+    ["rebase-apply", "rebase"],
+    ["CHERRY_PICK_HEAD", "cherry-pick"],
+    ["REVERT_HEAD", "revert"],
+    ["sequencer", "sequenced Git operation"],
+  ] as const;
+  for (const [marker, operation] of markers) {
+    const path = gitCommand(repoRoot, ["rev-parse", "--git-path", marker]);
+    if (existsSync(resolve(repoRoot, path))) return operation;
+  }
+  return undefined;
+}
+
+function assertMergeTarget(session: SessionManifest): void {
+  let branch: string;
+  try { branch = gitCommand(session.repoRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"]); }
+  catch { throw new Error(`original checkout must be on ${session.baseBranch}, but HEAD is detached`); }
+  if (branch !== session.baseBranch) {
+    throw new Error(`original checkout must be on ${session.baseBranch}, but is on ${branch}`);
+  }
+  const operation = gitOperationInProgress(session.repoRoot);
+  if (operation) throw new Error(`original checkout has a ${operation} in progress; complete or abort it before finishing`);
+  const dirty = gitCommand(session.repoRoot, ["status", "--porcelain", "--untracked-files=all"]);
+  if (dirty) throw new Error(`original checkout must be clean before finishing:\n${dirty}`);
+  const head = gitCommand(session.repoRoot, ["rev-parse", "HEAD"]);
+  if (head !== session.baseCommit) {
+    throw new Error(`original checkout moved since the ASL session started; expected ${session.baseCommit}, found ${head}`);
+  }
+}
+
+function gitSucceeds(repoRoot: string, args: string[]): boolean {
+  const result = spawnSync("git", ["-C", repoRoot, ...args], { stdio: "ignore" });
+  if (result.error) throw result.error;
+  return result.status === 0;
+}
+
+function assertIntegrationBranch(session: SessionManifest): void {
+  let branch: string;
+  try { branch = gitCommand(session.integrationWorktree, ["symbolic-ref", "--quiet", "--short", "HEAD"]); }
+  catch { throw new Error("integration worktree has a detached HEAD; cannot compact its flush history"); }
+  if (branch !== session.integrationBranch) {
+    throw new Error(`integration worktree must be on ${session.integrationBranch}, but is on ${branch}`);
+  }
+  const operation = gitOperationInProgress(session.integrationWorktree);
+  if (operation) throw new Error(`integration worktree has a ${operation} in progress; complete or abort it before finishing`);
+  const dirty = gitCommand(session.integrationWorktree, ["status", "--porcelain", "--untracked-files=all"]);
+  if (dirty) throw new Error(`integration worktree must be clean before compacting flush commits:\n${dirty}`);
+  if (!gitSucceeds(session.integrationWorktree, ["merge-base", "--is-ancestor", session.baseCommit, session.integrationBranch])) {
+    throw new Error(`integration branch no longer descends from the session base commit: ${session.integrationBranch}`);
+  }
+}
+
+export function compactIntegrationHistory(session: SessionManifest): number {
+  assertIntegrationBranch(session);
+  const count = Number(gitCommand(session.integrationWorktree, ["rev-list", "--count", `${session.baseCommit}..${session.integrationBranch}`]));
+  if (count <= 1) return count;
+  const integrationTree = gitCommand(session.integrationWorktree, ["rev-parse", `${session.integrationBranch}^{tree}`]);
+  const commit = gitCommand(session.integrationWorktree, [
+    "commit-tree",
+    integrationTree,
+    "-p",
+    session.baseCommit,
+    "-m",
+    "agent-sync: synchronized changes",
+  ]);
+  gitCommand(session.integrationWorktree, ["reset", "--hard", commit], "inherit");
+  return count;
+}
+
+export function prepareUncommittedMerge(session: SessionManifest): boolean {
+  assertMergeTarget(session);
+  try { gitCommand(session.repoRoot, ["rev-parse", "--verify", `${session.integrationBranch}^{commit}`]); }
+  catch { throw new Error(`integration branch does not exist: ${session.integrationBranch}`); }
+  if (!gitSucceeds(session.repoRoot, ["merge-base", "--is-ancestor", session.baseCommit, session.integrationBranch])) {
+    throw new Error(`integration branch no longer descends from the session base commit: ${session.integrationBranch}`);
+  }
+  const integrationHead = gitCommand(session.repoRoot, ["rev-parse", session.integrationBranch]);
+  if (integrationHead === session.baseCommit) return false;
+  try {
+    gitCommand(session.repoRoot, ["merge", "--no-ff", "--no-commit", "--no-edit", session.integrationBranch], "inherit");
+  } catch {
+    throw new Error("could not prepare the integration merge; inspect `git status` and use `git merge --abort` before retrying");
+  }
+  return true;
+}
+
+export async function finishSession(stateDir: string): Promise<FinishResult> {
   const session = readSession(stateDir);
   if (!session) throw new Error("no ASL session for this repository");
   if (session.status === "finished") throw new Error("the ASL session is already finished");
   if (session.agents.some((agent) => agent.status === "running" && agent.pid && processAlive(agent.pid))) {
     throw new Error("cannot finish while an ASL-launched agent is still running");
   }
+  assertMergeTarget(session);
   const daemon = await ensureDaemon(stateDir, session);
   void daemon;
   await controlRequest(stateDir, session, "flush");
@@ -209,9 +305,19 @@ export async function finishSession(stateDir: string): Promise<SessionManifest> 
   const dirty = gitCommand(session.integrationWorktree, ["status", "--porcelain", "--untracked-files=all"]);
   if (dirty) throw new Error(`integration worktree is not clean after the final flush:\n${dirty}`);
   await controlRequest(stateDir, session, "shutdown");
+  let mergePrepared: boolean;
+  let integrationCommitCount: number;
+  try {
+    integrationCommitCount = compactIntegrationHistory(session);
+    mergePrepared = prepareUncommittedMerge(session);
+  } catch (error) {
+    session.status = "paused";
+    writeSession(stateDir, session);
+    throw error;
+  }
   session.status = "finished";
   writeSession(stateDir, session);
-  return session;
+  return { session, mergePrepared, integrationCommitCount };
 }
 
 function changedPaths(worktree: string, integrationBranch?: string, agentBranch?: string): string[] {
