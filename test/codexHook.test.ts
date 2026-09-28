@@ -94,6 +94,24 @@ describe("Codex hook bridge", () => {
     expect(readFileSync(join(b, "src", "app.js"), "utf8")).toContain("HEADER = 21");
   }, 90_000);
 
+  it("syncs an edit whose initial snapshot anchor appears repeatedly", async () => {
+    const repeated = "12345678VALUE87654321";
+    const before = `first block\n${repeated}\nsecond block\n${repeated}\n`;
+    const target = before.lastIndexOf("VALUE");
+    const after = `${before.slice(0, target)}CHANGED${before.slice(target + "VALUE".length)}`;
+    writeFileSync(join(canonical, "src", "app.js"), before);
+    writeFileSync(join(a, "src", "app.js"), before);
+
+    expect((await runHook("pre", a, url, "repeated-1", "sa")).code).toBe(0);
+    writeFileSync(join(a, "src", "app.js"), after);
+    const published = await runHook("post", a, url, "repeated-1", "sa");
+
+    expect(published.code).toBe(0);
+    expect(published.stderr).toBe("");
+    expect(server.getDocContent("src/app.js")).toBe(after);
+    expect(readFileSync(join(a, "src", "app.js"), "utf8")).toBe(after);
+  }, 60_000);
+
   it("syncs new files but excludes Codex hook configuration", async () => {
     mkdirSync(join(a, ".codex"), { recursive: true });
     writeFileSync(join(a, ".codex", "hooks.json"), "{}");

@@ -29,6 +29,10 @@ describe("Phase 3: content-diff CRDT merge", () => {
       expect(computeMinimalReplacement("same", "same")).toBeNull();
     });
 
+    it("represents creation from an empty snapshot without inventing an anchor", () => {
+      expect(computeMinimalReplacement("", "created\n")).toEqual({ oldStr: "", newStr: "created\n" });
+    });
+
     it("collapses a pure append down to a small context-anchored replacement, not the whole string", () => {
       const oldSnapshot = "line1\nline2\nline3\n";
       const newContent = oldSnapshot + "line4\n";
@@ -54,6 +58,34 @@ describe("Phase 3: content-diff CRDT merge", () => {
       const newContent = "AAAA ZZZZ CCCC";
       const replacement = computeMinimalReplacement(oldSnapshot, newContent, 0);
       expect(replacement).toEqual({ oldStr: "BBBB", newStr: "ZZZZ" });
+    });
+
+    it("expands repetitive context until the intended snapshot span is unique", () => {
+      const repeated = "12345678VALUE87654321";
+      const oldSnapshot = `first block\n${repeated}\nsecond block\n${repeated}\n`;
+      const target = oldSnapshot.lastIndexOf("VALUE");
+      const newContent = `${oldSnapshot.slice(0, target)}CHANGED${oldSnapshot.slice(target + "VALUE".length)}`;
+
+      const replacement = computeMinimalReplacement(oldSnapshot, newContent);
+
+      expect(replacement).not.toBeNull();
+      expect(replacement!.oldStr.length).toBeGreaterThan("12345678VALUE87654321".length);
+      expect(oldSnapshot.indexOf(replacement!.oldStr)).toBe(oldSnapshot.lastIndexOf(replacement!.oldStr));
+      expect(oldSnapshot.replace(replacement!.oldStr, replacement!.newStr)).toBe(newContent);
+    });
+
+    it("uses the full snapshot as an exact anchor when repetition extends to the file boundaries", () => {
+      const oldSnapshot = "aaaaaaaaaaaaaaaa";
+      const newContent = "aaaaaaaaXaaaaaaaa";
+      expect(computeMinimalReplacement(oldSnapshot, newContent)).toEqual({ oldStr: oldSnapshot, newStr: newContent });
+    });
+
+    it("represents deletion with an exact anchored replacement", () => {
+      const oldSnapshot = "prefix REMOVE suffix";
+      const newContent = "prefix  suffix";
+      const replacement = computeMinimalReplacement(oldSnapshot, newContent);
+      expect(replacement).not.toBeNull();
+      expect(oldSnapshot.replace(replacement!.oldStr, replacement!.newStr)).toBe(newContent);
     });
   });
 });

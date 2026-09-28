@@ -18,7 +18,7 @@ export class RangeMismatchError extends Error {
     super(
       reason === "not_found"
         ? `File was modified concurrently and could not be automatically merged: the expected text was not found in "${path}". Re-read the file before retrying your edit.`
-        : `The expected text appears more than once in "${path}" and the edit's target location is ambiguous. Include more surrounding context and retry.`,
+        : `The expected text appears more than once in "${path}" and the edit's target location is ambiguous. Re-read the file and recompute the edit; do not retry the same replacement unchanged.`,
     );
     this.name = "RangeMismatchError";
   }
@@ -229,6 +229,13 @@ export class SyncFileOps {
       const ytext = client.getText();
       const normalizedOldSnapshot = toLf(oldSnapshot);
       const normalizedNewContent = toLf(newContent);
+      if (normalizedOldSnapshot === normalizedNewContent) return;
+
+      if (ytext.toString() === normalizedOldSnapshot) {
+        applyContentDiff(ytext, normalizedNewContent);
+        return;
+      }
+
       const replacement = computeMinimalReplacement(normalizedOldSnapshot, normalizedNewContent);
       if (!replacement) return;
 
@@ -237,9 +244,7 @@ export class SyncFileOps {
         // fd's snapshot was taken. Only safe to apply blind if nothing has
         // changed concurrently; otherwise there's no exact text to match, so
         // reject rather than guess where the new content belongs.
-        if (ytext.toString() !== normalizedOldSnapshot) throw new RangeMismatchError(path, "not_found");
-        applyContentDiff(ytext, normalizedNewContent);
-        return;
+        throw new RangeMismatchError(path, "not_found");
       }
 
       applyExactReplace(ytext, path, replacement.oldStr, replacement.newStr);

@@ -23,6 +23,7 @@ Tracks progress against the build order in [agent-sync-dev-spec.md](agent-sync-d
 
 ## Reliability fixes — hooks, persistence, transport, and FUSE
 
+- Prevent snapshot-based Codex/Bash/FUSE writes from entering deterministic retry loops on repetitive files: an unchanged live snapshot now applies its granular diff directly, while concurrent writes use an adaptively expanded anchor that is first proven unique in the writer's snapshot and then matched exactly once against live CRDT content. Genuine overlap and live ambiguity still reject without fuzzy matching.
 - Isolate hook snapshots by workspace, session, tool-call ID, and document path; do not store snapshots for read-only hooks.
 - Restore pre-flush disk bytes on validation rejection without Git checkout or index mutation; remove only files that did not previously exist.
 - Limit flush commits to their literal target path and mark content flushed only after Git succeeds, allowing retries after staging or commit failures.
