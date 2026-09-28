@@ -25,6 +25,7 @@ This exposes both `asl` and `agent-sync`. Published packages, standalone binarie
 | `asl stop` | Flush and pause a session while retaining its worktrees. |
 | `asl finish` | Flush, validate, stop, and prepare an uncommitted merge in the original checkout. |
 | `asl clean` | Remove safe managed worktrees and agent branches. |
+| `asl reset` | Stop agents and discard the entire managed session. |
 | `asl init [--force]` | Write the default `.agent-sync.yml`. |
 | `asl server [options]` | Run a standalone config-driven sync server. |
 | `asl dashboard [options]` | Watch rooms, connected peers, and locks. |
@@ -135,6 +136,16 @@ asl clean
 Removes managed agent worktrees and their agent branches, then removes the integration worktree. The integration branch is deliberately retained as the durable handoff result, including while the original checkout has the pending merge prepared by `asl finish`.
 
 Cleanup is allowed only after `stop` or `finish`. For each agent worktree, ASL compares uncommitted and branch-level changed paths with the integration worktree. If any content is absent or different in integration, cleanup refuses rather than deleting it. The repository's command-trust record is retained for later sessions.
+
+## `asl reset`
+
+```text
+asl reset
+```
+
+Destructively returns the current repository to a state where a new ASL session can be started. It sends `SIGTERM` to every running agent PID recorded in the session (then `SIGKILL` if a process does not exit), stops the daemon the same way, force-removes all recorded agent and integration worktrees, deletes their ASL-owned branches, prunes Git's worktree metadata, and removes all repository-scoped ASL state, including the setup/validation trust record.
+
+Unlike `clean`, reset intentionally discards uncommitted, unmatched, and unflushed changes inside managed worktrees. If `finish` prepared an uncommitted merge whose `MERGE_HEAD` exactly matches the recorded integration branch, reset aborts it before deleting that branch. It refuses to alter any unrelated merge. Commits and files already accepted on the original project branch are left intact, as are unrelated Git worktrees and branches. Running reset when no session exists succeeds as a no-op.
 
 ## `asl init`
 

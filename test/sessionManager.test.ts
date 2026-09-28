@@ -1,5 +1,5 @@
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,8 +9,9 @@ import {
   createAgentWorktree,
   ensureSession,
   prepareUncommittedMerge,
+  resetSession,
 } from "../src/cli/sessionManager.js";
-import { discoverRepository, repositoryStateDir, writeSession } from "../src/cli/sessionState.js";
+import { discoverRepository, readSession, repositoryStateDir, writeSession } from "../src/cli/sessionState.js";
 
 const roots: string[] = [];
 function git(cwd: string, args: string[]): string {
@@ -153,5 +154,69 @@ describe("ASL managed Git sessions", () => {
 
     expect(() => prepareUncommittedMerge(session)).toThrow(/merge in progress/);
     git(fixture.repo, ["merge", "--abort"]);
+  });
+
+  it("resets active sessions by discarding managed worktrees, branches, and state", async () => {
+    const fixture = repoFixture();
+    const repo = discoverRepository(fixture.repo);
+    const stateDir = repositoryStateDir(repo, { ASL_STATE_DIR: fixture.stateRoot });
+    const session = ensureSession(repo, stateDir, true);
+    const { agent } = createAgentWorktree(repo, stateDir, "codex", { skipSetup: true });
+    writeFileSync(join(agent.worktree, "unmatched.txt"), "discard me\n");
+    writeFileSync(join(session.integrationWorktree, "app.txt"), "also discard me\n");
+    git(session.integrationWorktree, ["add", "app.txt"]);
+    git(session.integrationWorktree, ["commit", "-qm", "integration work"]);
+
+    const result = await resetSession(stateDir);
+
+    expect(result).toEqual(expect.objectContaining({ hadSession: true, sessionId: session.sessionId }));
+    expect(existsSync(agent.worktree)).toBe(false);
+    expect(existsSync(session.integrationWorktree)).toBe(false);
+    expect(git(fixture.repo, ["branch", "--list", agent.branch])).toBe("");
+    expect(git(fixture.repo, ["branch", "--list", session.integrationBranch])).toBe("");
+    expect(readSession(stateDir)).toBeUndefined();
+    expect(readFileSync(join(fixture.repo, "app.txt"), "utf8")).toBe("base\n");
+  });
+
+  it("terminates a recorded running agent before removing its worktree", async () => {
+    const fixture = repoFixture();
+    const repo = discoverRepository(fixture.repo);
+    const stateDir = repositoryStateDir(repo, { ASL_STATE_DIR: fixture.stateRoot });
+    ensureSession(repo, stateDir, true);
+    const { agent, session } = createAgentWorktree(repo, stateDir, "codex", { skipSetup: true });
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    await new Promise<void>((resolvePromise, reject) => {
+      child.once("spawn", resolvePromise);
+      child.once("error", reject);
+    });
+    agent.pid = child.pid;
+    agent.status = "running";
+    session.agents[0] = agent;
+    writeSession(stateDir, session);
+
+    const exited = new Promise<void>((resolvePromise) => child.once("exit", () => resolvePromise()));
+    const result = await resetSession(stateDir);
+    await exited;
+
+    expect(result.agentsStopped).toBe(1);
+    expect(() => process.kill(child.pid!, 0)).toThrow();
+  });
+
+  it("aborts only the pending merge prepared from its integration branch", async () => {
+    const fixture = repoFixture();
+    const repo = discoverRepository(fixture.repo);
+    const stateDir = repositoryStateDir(repo, { ASL_STATE_DIR: fixture.stateRoot });
+    const session = ensureSession(repo, stateDir, true);
+    writeFileSync(join(session.integrationWorktree, "app.txt"), "integrated\n");
+    git(session.integrationWorktree, ["add", "app.txt"]);
+    git(session.integrationWorktree, ["commit", "-qm", "integrated"]);
+    expect(prepareUncommittedMerge(session)).toBe(true);
+
+    const result = await resetSession(stateDir);
+
+    expect(result.mergeAborted).toBe(true);
+    expect(() => git(fixture.repo, ["rev-parse", "--verify", "MERGE_HEAD"])).toThrow();
+    expect(git(fixture.repo, ["status", "--porcelain"])).toBe("");
+    expect(readFileSync(join(fixture.repo, "app.txt"), "utf8")).toBe("base\n");
   });
 });

@@ -85,15 +85,27 @@ export async function launchAgent(
       ASL_SESSION_ID: agent.id,
     },
   });
+  let forcedTermination: NodeJS.Timeout | undefined;
+  const terminateChild = () => {
+    try { child.kill("SIGTERM"); } catch { /* child may have exited between signal delivery and forwarding */ }
+    forcedTermination = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch { /* child already exited */ }
+    }, 2_000);
+  };
+  process.once("SIGTERM", terminateChild);
   return await new Promise<number>((resolvePromise, reject) => {
     child.once("spawn", () => updateAgent(stateDir, agent.id, { pid: child.pid, status: "running" }));
     child.once("error", (error) => {
-      updateAgent(stateDir, agent.id, { status: "exited", exitCode: 127, pid: undefined });
+      process.off("SIGTERM", terminateChild);
+      if (forcedTermination) clearTimeout(forcedTermination);
+      updateAgent(stateDir, agent.id, { status: "exited", exitCode: 127, launcherPid: undefined, pid: undefined });
       reject(new Error(`failed to start ${executable}: ${error.message}`));
     });
     child.once("exit", (code, signal) => {
+      process.off("SIGTERM", terminateChild);
+      if (forcedTermination) clearTimeout(forcedTermination);
       const exitCode = code ?? (signal ? 1 : 0);
-      updateAgent(stateDir, agent.id, { status: "exited", exitCode, pid: undefined });
+      updateAgent(stateDir, agent.id, { status: "exited", exitCode, launcherPid: undefined, pid: undefined });
       resolvePromise(exitCode);
     });
   });

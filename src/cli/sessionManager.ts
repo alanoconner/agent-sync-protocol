@@ -25,12 +25,21 @@ import {
 export interface LaunchOptions {
   name?: string;
   skipSetup?: boolean;
+  launcherPid?: number;
 }
 
 export interface FinishResult {
   session: SessionManifest;
   mergePrepared: boolean;
   integrationCommitCount: number;
+}
+
+export interface ResetResult {
+  hadSession: boolean;
+  sessionId?: string;
+  agentsStopped: number;
+  daemonStopped: boolean;
+  mergeAborted: boolean;
 }
 
 function removeWorktree(repoRoot: string, worktree: string, branch: string): void {
@@ -104,7 +113,15 @@ export function createAgentWorktree(
       removeWorktree(repo.root, worktree, branch);
       throw error;
     }
-    const agent: AgentRecord = { id, kind, branch, worktree, status: "starting", createdAt: new Date().toISOString() };
+    const agent: AgentRecord = {
+      id,
+      kind,
+      branch,
+      worktree,
+      launcherPid: options.launcherPid,
+      status: "starting",
+      createdAt: new Date().toISOString(),
+    };
     session.agents.push(agent);
     writeSession(stateDir, session);
     return { session, agent };
@@ -113,6 +130,31 @@ export function createAgentWorktree(
 
 function processAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processAlive(pid)) return true;
+    await delay(50);
+  }
+  return !processAlive(pid);
+}
+
+async function terminateManagedProcess(pid: number, label: string): Promise<boolean> {
+  if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) {
+    throw new Error(`refusing to stop ${label}: invalid recorded process id ${pid}`);
+  }
+  if (!processAlive(pid)) return false;
+  try { process.kill(pid, "SIGTERM"); }
+  catch (error) {
+    if (!processAlive(pid)) return false;
+    throw error;
+  }
+  if (await waitForProcessExit(pid, 3_000)) return true;
+  process.kill(pid, "SIGKILL");
+  if (!await waitForProcessExit(pid, 2_000)) throw new Error(`could not stop ${label} (pid ${pid})`);
+  return true;
 }
 
 function selfCommand(): { command: string; prefix: string[] } {
@@ -364,4 +406,80 @@ export async function cleanSession(stateDir: string): Promise<{ integrationBranc
   rmSync(stateDir, { recursive: true, force: true });
   if (trust !== undefined) writeJsonAtomic(trustPath(stateDir), trust);
   return { integrationBranch };
+}
+
+function abortPreparedAslMerge(session: SessionManifest): boolean {
+  const mergeHeadPath = resolve(session.repoRoot, gitCommand(session.repoRoot, ["rev-parse", "--git-path", "MERGE_HEAD"]));
+  if (!existsSync(mergeHeadPath)) return false;
+  const mergeHead = gitCommand(session.repoRoot, ["rev-parse", "MERGE_HEAD"]);
+  let integrationHead: string;
+  try { integrationHead = gitCommand(session.repoRoot, ["rev-parse", `${session.integrationBranch}^{commit}`]); }
+  catch { throw new Error("original checkout has a merge in progress, but the ASL integration branch is missing; abort it manually before resetting"); }
+  if (mergeHead !== integrationHead) {
+    throw new Error("original checkout has a non-ASL merge in progress; complete or abort it before resetting");
+  }
+  gitCommand(session.repoRoot, ["merge", "--abort"], "inherit");
+  return true;
+}
+
+function registeredWorktrees(repoRoot: string): Set<string> {
+  const paths = new Set<string>();
+  for (const line of gitCommand(repoRoot, ["worktree", "list", "--porcelain"]).split("\n")) {
+    if (line.startsWith("worktree ")) paths.add(resolve(line.slice("worktree ".length)));
+  }
+  return paths;
+}
+
+function removeManagedWorktree(repoRoot: string, worktree: string, branch: string): void {
+  if (existsSync(worktree) || registeredWorktrees(repoRoot).has(resolve(worktree))) {
+    gitCommand(repoRoot, ["worktree", "remove", "--force", worktree], "inherit");
+  }
+  if (gitSucceeds(repoRoot, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])) {
+    gitCommand(repoRoot, ["branch", "-D", branch], "inherit");
+  }
+}
+
+/**
+ * Destructively removes every artifact owned by the repository's current ASL
+ * session. Unlike cleanSession, this intentionally discards unmatched agent
+ * and integration changes so the next launch can create a new session.
+ */
+export async function resetSession(stateDir: string): Promise<ResetResult> {
+  const release = acquireStateLock(stateDir);
+  let session: SessionManifest | undefined;
+  try {
+    session = readSession(stateDir);
+    if (session) {
+      // Block a concurrent launcher from adding another worktree while reset is
+      // stopping processes and removing the recorded session artifacts.
+      session.status = "finished";
+      writeSession(stateDir, session);
+    }
+  } finally { release(); }
+
+  if (!session) {
+    rmSync(stateDir, { recursive: true, force: true });
+    return { hadSession: false, agentsStopped: 0, daemonStopped: false, mergeAborted: false };
+  }
+
+  let agentsStopped = 0;
+  for (const agent of session.agents) {
+    let stopped = agent.pid ? await terminateManagedProcess(agent.pid, `agent ${agent.id}`) : false;
+    if (!stopped && agent.launcherPid) {
+      stopped = await terminateManagedProcess(agent.launcherPid, `agent launcher ${agent.id}`);
+    }
+    if (stopped) agentsStopped += 1;
+  }
+
+  const daemon = readDaemon(stateDir);
+  const daemonStopped = daemon ? await terminateManagedProcess(daemon.pid, "ASL daemon") : false;
+  const mergeAborted = abortPreparedAslMerge(session);
+
+  for (const agent of session.agents) {
+    removeManagedWorktree(session.repoRoot, agent.worktree, agent.branch);
+  }
+  removeManagedWorktree(session.repoRoot, session.integrationWorktree, session.integrationBranch);
+  gitCommand(session.repoRoot, ["worktree", "prune"]);
+  rmSync(stateDir, { recursive: true, force: true });
+  return { hadSession: true, sessionId: session.sessionId, agentsStopped, daemonStopped, mergeAborted };
 }

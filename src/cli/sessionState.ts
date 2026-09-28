@@ -19,6 +19,7 @@ export interface AgentRecord {
   kind: AgentKind;
   branch: string;
   worktree: string;
+  launcherPid?: number;
   pid?: number;
   status: "starting" | "running" | "exited";
   exitCode?: number;

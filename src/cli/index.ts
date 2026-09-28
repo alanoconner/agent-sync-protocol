@@ -11,7 +11,7 @@ import type { ServerStatus } from "../server/syncServer.js";
 import { launchAgent } from "./agentLauncher.js";
 import { formatStatus, statusUrlFor } from "./dashboardView.js";
 import { runSessionDaemon } from "./sessionDaemon.js";
-import { cleanSession, createAgentWorktree, ensureDaemon, ensureSession, finishSession, stopSession } from "./sessionManager.js";
+import { cleanSession, createAgentWorktree, ensureDaemon, ensureSession, finishSession, resetSession, stopSession } from "./sessionManager.js";
 import { detectSetupCommand } from "./setupCommand.js";
 import {
   discoverRepository,
@@ -34,6 +34,7 @@ Commands:
   stop                       Flush and pause the current session
   finish                     Flush, validate, and prepare an uncommitted merge
   clean                      Remove safe managed worktrees; retain integration branch
+  reset                      Stop agents and discard all managed session artifacts
   init [--force]             Write a default ${CONFIG_FILE_NAME}
   server [options]           Start a standalone sync server
   dashboard [options]        Live "who's editing what" view
@@ -170,7 +171,11 @@ async function runAgent(kind: AgentKind, args: string[]): Promise<void> {
   let session = ensureSession(repo, stateDir, options.skipSetup);
   if (session.status === "paused") { session.status = "active"; writeSession(stateDir, session); }
   const daemon = await ensureDaemon(stateDir, session);
-  const created = createAgentWorktree(repo, stateDir, kind, { name: options.name, skipSetup: options.skipSetup });
+  const created = createAgentWorktree(repo, stateDir, kind, {
+    name: options.name,
+    skipSetup: options.skipSetup,
+    launcherPid: process.pid,
+  });
   console.log(`asl: ${kind} workspace ${created.agent.worktree}`);
   console.log(`asl: integration branch ${created.session.integrationBranch}`);
   if (kind === "codex") console.log("asl: on first use, open /hooks and trust the stable ASL hook definition before submitting work.");
@@ -232,6 +237,21 @@ async function runClean(): Promise<void> {
   console.log(`Removed safe ASL worktrees and agent branches. Integration branch retained: ${result.integrationBranch}`);
 }
 
+async function runReset(): Promise<void> {
+  const repo = discoverRepository(process.cwd(), false);
+  const result = await resetSession(repositoryStateDir(repo));
+  if (!result.hadSession) {
+    console.log("No ASL session for this repository; repository state is already clean.");
+    return;
+  }
+  const stopped = [
+    `${result.agentsStopped} agent process${result.agentsStopped === 1 ? "" : "es"}`,
+    result.daemonStopped ? "the daemon" : undefined,
+  ].filter(Boolean).join(" and ");
+  console.log(`Reset ASL session ${result.sessionId}; stopped ${stopped || "no running processes"} and removed all managed worktrees, branches, and state.`);
+  if (result.mergeAborted) console.log("Aborted the session's pending uncommitted merge in the original checkout.");
+}
+
 async function main(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
   switch (command) {
@@ -240,6 +260,7 @@ async function main(argv: string[]): Promise<void> {
     case "stop": await runStop(); break;
     case "finish": await runFinish(); break;
     case "clean": await runClean(); break;
+    case "reset": await runReset(); break;
     case "init": runInit(rest); break;
     case "server": runServer(rest); break;
     case "dashboard": await runDashboard(rest); break;

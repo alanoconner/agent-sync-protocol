@@ -343,6 +343,8 @@ State this section's contents plainly in any product documentation or README —
 
 **Phase 7 — CLI + config + dashboard.** `agent-sync init`, `.agent-sync.yml`, a basic "who's editing what" view from the awareness channel.
 
+The managed Phase 9 launcher also exposes explicit lifecycle commands: `stop` pauses without removing worktrees, `finish` prepares the reviewed integration result as an uncommitted merge, guarded `clean` removes only safely integrated agent worktrees, and destructive `reset` terminates recorded processes and deletes all worktrees, branches, and state owned by the current session so the repository can start a new one.
+
 **Phase 8 — Symbol index / dependency-change awareness (Section 5).** Single language first. Do not start before Phases 1–5 are proven against real multi-agent usage.
 
 **Phase 9 — Cross-platform packaging.** Single binary per OS (Node SEA or `pkg`), npm-published client SDK, install docs.

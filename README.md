@@ -35,9 +35,12 @@ On first use, ASL shows any repository-defined setup or validation command befor
 asl status       # inspect the session, daemon, worktrees, and agents
 asl finish       # flush, validate, and stage an uncommitted merge on the original branch
 asl clean        # remove safe agent worktrees/branches; retain the integration branch
+asl reset        # stop agents and discard the entire managed session
 ```
 
 `asl finish` keeps granular flush commits for recovery while agents work, then compacts them into one integration commit and prepares a real `--no-ff --no-commit` merge in the original checkout. Review the staged result, then either commit it or run `git merge --abort`. It refuses to proceed if that checkout is dirty, is no longer on the session's original branch and commit, or has another Git operation in progress. Use `asl stop` instead when you want to flush and pause while retaining all managed worktrees.
+
+`asl reset` is the destructive start-over command. It terminates the agent processes recorded in the current repository's ASL session, stops the daemon, force-removes all recorded agent and integration worktrees, deletes their `asl/...` branches, and removes the repository's state and trust record under `~/.asl`. Unmatched and unflushed work in those managed worktrees is intentionally discarded. If `asl finish` left its ASL integration merge pending, reset aborts that merge too; it refuses to touch an unrelated merge. Files and commits already accepted in the original project branch are not removed.
 
 ## Core demo — see two clients converge
 
@@ -125,6 +128,7 @@ asl status [--json]                   # inspect the current repository session
 asl stop                              # flush, stop the daemon, retain worktrees
 asl finish                            # flush, validate, stop, and prepare an uncommitted merge
 asl clean                             # remove safe worktrees; retain the integration branch
+asl reset                             # stop agents and discard all managed session artifacts
 asl init                              # write .agent-sync.yml (--force to overwrite)
 asl server                            # start the server from .agent-sync.yml
   --config <path>                     #   config file to read (default ./.agent-sync.yml)
@@ -134,7 +138,7 @@ asl dashboard                         # live "who's editing what" view, polling 
   --interval <ms>                     #   poll interval (default 1000)
 ```
 
-`agent-sync` remains an alias for `asl`. Managed session state lives outside the target repository under `~/.asl` (override with `ASL_STATE_DIR` for testing). ASL refuses to start from a dirty checkout, detached HEAD, or missing Git identity. Cleanup also refuses to remove an agent worktree if it contains changes that are not present in the integration worktree.
+`agent-sync` remains an alias for `asl`. Managed session state lives outside the target repository under `~/.asl` (override with `ASL_STATE_DIR` for testing). ASL refuses to start from a dirty checkout, detached HEAD, or missing Git identity. `clean` refuses to remove an agent worktree if it contains changes that are not present in the integration worktree; `reset` is the explicit destructive alternative when those changes should be discarded.
 
 During development, run any of these straight from source with `npm run cli -- <command> [options]` instead of installing the package.
 

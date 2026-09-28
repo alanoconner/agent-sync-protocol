@@ -1,5 +1,5 @@
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -49,6 +49,55 @@ afterEach(() => {
 });
 
 describe("ASL CLI managed lifecycle", () => {
+  it("treats reset without a session as an idempotent no-op", () => {
+    const { repo, state } = fixture();
+    expect(command(repo, state, ["reset"])).toContain("already clean");
+  });
+
+  it("stops a running agent and resets its live session from the public CLI", async () => {
+    const { repo, state } = fixture();
+    const fakeAgent = join(repo, "fake-agent.sh");
+    writeFileSync(fakeAgent, "#!/bin/sh\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n");
+    chmodSync(fakeAgent, 0o755);
+    execFileSync("git", ["-C", repo, "add", "fake-agent.sh"]);
+    execFileSync("git", ["-C", repo, "commit", "-qm", "fake agent"]);
+    const launcher = spawn(TSX, [CLI, "codex", "--yes", "--skip-setup", "--bin", fakeAgent], {
+      cwd: repo,
+      env: { ...process.env, ASL_STATE_DIR: state },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const launcherExit = new Promise<void>((resolvePromise, reject) => {
+      launcher.once("exit", () => resolvePromise());
+      launcher.once("error", reject);
+    });
+    await new Promise<void>((resolvePromise, reject) => {
+      let stdout = "";
+      launcher.stdout.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString();
+        if (stdout.includes("codex workspace")) resolvePromise();
+      });
+      launcher.once("error", reject);
+      launcher.once("exit", (code) => reject(new Error(`agent launcher exited before reset with code ${code}`)));
+    });
+    const status = JSON.parse(command(repo, state, ["status", "--json"])) as {
+      integrationBranch: string;
+      integrationWorktree: string;
+      agents: { branch: string; worktree: string; running: boolean }[];
+    };
+    expect(status.agents[0].running).toBe(true);
+
+    const output = command(repo, state, ["reset"]);
+    await launcherExit;
+
+    expect(output).toContain("1 agent process");
+    expect(output).toContain("removed all managed worktrees, branches, and state");
+    expect(existsSync(status.integrationWorktree)).toBe(false);
+    expect(existsSync(status.agents[0].worktree)).toBe(false);
+    expect(execFileSync("git", ["-C", repo, "branch", "--list", status.integrationBranch], { encoding: "utf8" })).toBe("");
+    expect(execFileSync("git", ["-C", repo, "branch", "--list", status.agents[0].branch], { encoding: "utf8" })).toBe("");
+    expect(command(repo, state, ["status"])).toContain("No ASL session");
+  }, 60_000);
+
   it("launches Codex, syncs an edit through Yjs, finishes, and cleans safely", () => {
     const { repo, state } = fixture();
     const launch = command(repo, state, ["codex", "--yes", "--skip-setup", "--bin", "/usr/bin/true"]);
