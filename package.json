@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "bin": {
-    "agent-sync": "dist/cli/index.js"
+    "agent-sync": "dist/cli/index.js",
+    "asl": "dist/cli/index.js"
   },
   "scripts": {
     "build": "tsc -p .",

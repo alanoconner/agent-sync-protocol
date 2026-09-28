@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { HookSnapshots } from "../examples/hookSnapshots.js";
+import { HookSnapshots } from "../src/hooks/hookSnapshots.js";
 
 describe("hook snapshot isolation", () => {
   const directories: string[] = [];

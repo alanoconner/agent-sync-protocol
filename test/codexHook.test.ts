@@ -7,7 +7,7 @@ import { createDiskHydrator } from "../src/flush/diskHydration.js";
 import { SyncServer } from "../src/server/syncServer.js";
 
 const TSX = join(process.cwd(), "node_modules", ".bin", "tsx");
-const HOOK = join(process.cwd(), "examples", "codexHook.ts");
+const CLI = join(process.cwd(), "src", "cli", "index.ts");
 const ORIGINAL = "const A = 1;\nconst HEADER = 34;\nconst B = 2;\n";
 
 function runHook(
@@ -22,7 +22,7 @@ function runHook(
   return new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
     const child = execFile(
       TSX,
-      [HOOK, mode],
+      [CLI, "_hook", "codex", mode],
       { cwd: workspace, env: { ...process.env, AGENT_SYNC_SERVER: serverUrl } },
       (error, stdout, stderr) =>
         resolve({ code: error ? ((error as { code?: number }).code ?? 1) : 0, stdout, stderr }),

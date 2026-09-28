@@ -16,6 +16,10 @@ export interface AgentSyncConfig {
   flush: {
     debounceMs: number;
   };
+  worktrees: {
+    autoInstall: boolean;
+    setupCommand?: string;
+  };
   /** Absent means "no validation gate configured" — Phase 5's `DiskFlushService` behavior with no `validation` option passed at all. */
   validation?: {
     command: string;
@@ -35,6 +39,7 @@ export const DEFAULT_CONFIG: AgentSyncConfig = {
   paths: { exclusive: [], ignore: ["node_modules/**", "dist/**"] },
   lineEndings: "lf",
   flush: { debounceMs: 3000 },
+  worktrees: { autoInstall: true, setupCommand: undefined },
   validation: undefined,
   symbolIndex: { enabled: false, language: "typescript", enforcement: "advisory" },
 };
@@ -62,6 +67,11 @@ line_endings: ${DEFAULT_CONFIG.lineEndings}
 
 flush:
   debounce_ms: ${DEFAULT_CONFIG.flush.debounceMs}
+
+worktrees:
+  # Install dependencies in each managed worktree when a known lockfile is present.
+  auto_install: true
+  # setup_command: "npm ci"   # Overrides lockfile detection when set.
 
 # Uncomment and set a real command to gate commits behind lint/typecheck/test.
 # validation:
@@ -132,6 +142,13 @@ function parseValidation(raw: unknown): AgentSyncConfig["validation"] {
   return { command, onFail };
 }
 
+function readOptionalString(raw: Record<string, unknown>, key: string): string | undefined {
+  const value = raw[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || value.trim() === "") throw new Error(`"${key}" must be a non-empty string`);
+  return value;
+}
+
 /**
  * Parses a `.agent-sync.yml`-shaped document (Section 7). Unlike
  * `.agent-sync-mcp-map.yml` (Section 3.2), every field here has a sane
@@ -147,6 +164,7 @@ export function parseAgentSyncConfig(yamlText: string): AgentSyncConfig {
 
   const pathsRaw = readObject(raw, "paths");
   const flushRaw = readObject(raw, "flush");
+  const worktreesRaw = readObject(raw, "worktrees");
   const symbolIndexRaw = readObject(raw, "symbol_index");
 
   return {
@@ -157,6 +175,10 @@ export function parseAgentSyncConfig(yamlText: string): AgentSyncConfig {
     },
     lineEndings: readEnum(raw, "line_endings", ["lf", "crlf"] as const, DEFAULT_CONFIG.lineEndings),
     flush: { debounceMs: readNumber(flushRaw, "debounce_ms", DEFAULT_CONFIG.flush.debounceMs) },
+    worktrees: {
+      autoInstall: readBoolean(worktreesRaw, "auto_install", DEFAULT_CONFIG.worktrees.autoInstall),
+      setupCommand: readOptionalString(worktreesRaw, "setup_command"),
+    },
     validation: parseValidation(raw.validation),
     symbolIndex: {
       enabled: readBoolean(symbolIndexRaw, "enabled", DEFAULT_CONFIG.symbolIndex.enabled),

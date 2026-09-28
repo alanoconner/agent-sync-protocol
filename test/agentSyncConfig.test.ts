@@ -33,6 +33,9 @@ paths:
 line_endings: crlf
 flush:
   debounce_ms: 2000
+worktrees:
+  auto_install: false
+  setup_command: "corepack pnpm install --frozen-lockfile"
 validation:
   command: "npm run lint && npm test"
   on_fail: warn_only
@@ -46,6 +49,7 @@ symbol_index:
       paths: { exclusive: ["package.json", "src/schema.ts"], ignore: ["node_modules/**"] },
       lineEndings: "crlf",
       flush: { debounceMs: 2000 },
+      worktrees: { autoInstall: false, setupCommand: "corepack pnpm install --frozen-lockfile" },
       validation: { command: "npm run lint && npm test", onFail: "warn_only" },
       symbolIndex: { enabled: true, language: "python", enforcement: "blocking" },
     });
@@ -62,6 +66,11 @@ symbol_index:
 
   it("rejects a non-numeric flush.debounce_ms", () => {
     expect(() => parseAgentSyncConfig("flush:\n  debounce_ms: soon\n")).toThrow(/debounce_ms/);
+  });
+
+  it("validates worktree setup configuration", () => {
+    expect(() => parseAgentSyncConfig("worktrees:\n  auto_install: yes\n")).toThrow(/auto_install/);
+    expect(() => parseAgentSyncConfig("worktrees:\n  setup_command: ''\n")).toThrow(/setup_command/);
   });
 
   it("rejects a non-list paths.exclusive", () => {

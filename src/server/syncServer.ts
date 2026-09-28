@@ -73,6 +73,8 @@ export interface DocHydratedEvent {
 }
 
 export interface SyncServerOptions {
+  /** Optional bind host. ASL-managed daemons use 127.0.0.1; omitted preserves the historical all-interface behavior. */
+  host?: string;
   /**
    * Initial content for a room that's being created for the first time —
    * `undefined` (or an empty string) means "start empty," which is what every
@@ -113,7 +115,7 @@ export class SyncServer extends Observable<string> {
     });
     this.wss = new WebSocketServer({ server: this.httpServer });
     this.wss.on("connection", (ws, req) => this.handleConnection(ws, req.url ?? "/"));
-    this.httpServer.listen(port);
+    this.httpServer.listen(port, options.host);
   }
 
   private getRoom(name: string): Room {
@@ -281,6 +283,11 @@ export class SyncServer extends Observable<string> {
     return this.rooms.get(docName)?.doc.getText("content").toString();
   }
 
+  /** Recreates known rooms after a graceful daemon restart so hooks can pull their current disk-hydrated state. */
+  preloadDocNames(docNames: string[]): void {
+    for (const docName of docNames) this.getRoom(docName);
+  }
+
   /**
    * Records a validation-gate rejection (Phase 5, spec Section 6) for a doc,
    * as an entry in a reserved Y.Map on the same Y.Doc as the file content —
@@ -328,6 +335,14 @@ export class SyncServer extends Observable<string> {
       throw new Error("server is not listening on a TCP port");
     }
     return address.port;
+  }
+
+  whenListening(): Promise<void> {
+    if (this.httpServer.listening) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      this.httpServer.once("listening", resolve);
+      this.httpServer.once("error", reject);
+    });
   }
 
   close(): Promise<void> {

@@ -2,6 +2,17 @@
 
 Tracks progress against the build order in [agent-sync-dev-spec.md](agent-sync-dev-spec.md) Section 10. Entries are grouped by phase, in build order, not by date. See `CLAUDE.md` for the architectural detail behind each item — this file is a progress record, not a design doc.
 
+## Phase 9 groundwork — managed `asl` agent launcher
+
+- Added `asl codex` and `asl claude`. From a clean project checkout, one command creates/reuses an isolated integration worktree, creates a per-agent worktree and branch, starts a detached loopback-only Yjs/flush daemon, injects compiled hooks and environment variables, and launches the requested coding-agent CLI in that worktree.
+- Moved the production hook bridge and workspace scanner into compiled `src/hooks/` modules. Codex hooks are injected through CLI config overrides without bypassing Codex trust; Claude Code receives an ASL-generated settings file. The older `examples/` bridge remains as a manual reference path.
+- Added lockfile-driven worktree setup for npm, pnpm, Yarn, and Bun, plus `worktrees.auto_install` and `worktrees.setup_command`. Repository-defined setup and validation commands require an explicit first-use trust decision, and setup is rolled back if it fails or dirties the worktree.
+- Added repository-scoped state under `~/.asl`, `asl status`, `stop`, `finish`, and guarded `clean`. Finalization flushes all CRDT rooms, reruns validation, shuts down the daemon, preserves the integration branch, and prints merge/cherry-pick commands without modifying the user's branch. Cleanup refuses to discard unmatched worktree changes.
+- The daemon persists its known document list so a restarted session rehydrates CRDT rooms from the integration worktree. Its authenticated control API is bound to `127.0.0.1`; the synchronization listener is loopback-only as well.
+- Added unit coverage for setup detection, hook injection/argument ownership, worktree lifecycle, and cleanup guards, plus an end-to-end CLI test proving an agent worktree edit passes through the hook and Yjs before being committed on the integration branch while the original checkout stays unchanged.
+- Added `docs/asl-cli.md` as the complete public command and operations reference, including lifecycle semantics, option forwarding, configuration, state layout, safety checks, limitations, and internal-command boundaries.
+- This is packaging groundwork, not completion of Phase 9: standalone binary builds, npm publication, platform installers, and installation CI remain outstanding.
+
 ## Phase 3 addendum — Codex hook adapter
 
 - Added `examples/codexHook.ts`, a Codex-native `PreToolUse`/`PostToolUse` bridge for canonical `apply_patch` and `Bash` events. Both paths pull active rooms and use the command-agnostic workspace snapshot/diff flow, then publish changes through `writeFileFromSnapshot` so stale overlapping edits are rejected and reverted rather than guessed.

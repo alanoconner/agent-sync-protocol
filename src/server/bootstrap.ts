@@ -6,6 +6,7 @@ import { ValidationGateService, type ValidationOnFail } from "../validation/vali
 
 export interface StartServerOptions {
   port: number;
+  host?: string;
   /** When set, wires up Phase 4's disk flush (and Phase 5's validation gate, if `validation` is also set) against this directory. Omitted means zero persistence, matching every phase before Phase 4. */
   repoRoot?: string;
   flushDebounceMs?: number;
@@ -23,21 +24,42 @@ export interface StartServerOptions {
  * rather than being duplicated between them.
  */
 export function startAgentSyncServer(options: StartServerOptions): SyncServer {
+  return createAgentSyncRuntime(options).server;
+}
+
+export interface AgentSyncRuntime {
+  server: SyncServer;
+  flushAll(): Promise<{ pending: string[] }>;
+  close(options?: { flush?: boolean }): Promise<{ pending: string[] }>;
+}
+
+/** Lifecycle-aware variant used by the managed ASL daemon. */
+export function createAgentSyncRuntime(options: StartServerOptions): AgentSyncRuntime {
   const log = options.log ?? console.log;
   // With a repo root, a room's first creation seeds it from the working tree
   // (disk→CRDT); without one, rooms start empty, as in every phase before 4.
   const server = new SyncServer(options.port, {
+    host: options.host,
     hydrate: options.repoRoot ? createDiskHydrator(options.repoRoot) : undefined,
   });
   log(`agent-sync server listening on ws://localhost:${options.port}`);
 
-  if (!options.repoRoot) return server;
+  if (!options.repoRoot) {
+    return {
+      server,
+      flushAll: async () => ({ pending: [] }),
+      close: async () => {
+        await server.close();
+        return { pending: [] };
+      },
+    };
+  }
 
   const validation = options.validation
     ? new ValidationGateService({ command: options.validation.command, onFail: options.validation.onFail, cwd: options.repoRoot })
     : undefined;
 
-  new DiskFlushService({
+  const flush = new DiskFlushService({
     server,
     repoRoot: options.repoRoot,
     debounceMs: options.flushDebounceMs,
@@ -57,5 +79,19 @@ export function startAgentSyncServer(options: StartServerOptions): SyncServer {
     console.warn(`agent-sync: validation failed for "${docName}" (${command}) but committing anyway (warn_only):\n${output}`);
   });
 
-  return server;
+  return {
+    server,
+    flushAll: async () => {
+      await flush.flushAll();
+      return { pending: flush.getPendingDocNames() };
+    },
+    close: async ({ flush: shouldFlush = true } = {}) => {
+      if (shouldFlush) await flush.flushAll();
+      const pending = flush.getPendingDocNames();
+      if (pending.length > 0) return { pending };
+      flush.close();
+      await server.close();
+      return { pending: [] };
+    },
+  };
 }

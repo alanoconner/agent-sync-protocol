@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { findWorkspaceRoot } from "../examples/workspaceRoot.js";
+import { findWorkspaceRoot } from "../src/hooks/workspaceRoot.js";
 
 describe("hook workspace root", () => {
   const directories: string[] = [];

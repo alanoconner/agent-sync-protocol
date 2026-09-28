@@ -201,6 +201,11 @@ export class DiskFlushService {
     }
   }
 
+  /** Docs whose live CRDT content has not reached a successful disk/Git flush yet. */
+  getPendingDocNames(): string[] {
+    return this.server.getDocNames().filter((docName) => this.lastFlushedContent.get(docName) !== this.server.getDocContent(docName));
+  }
+
   private resolveWithinRepo(docName: string): string {
     const absPath = resolve(this.repoRoot, docName);
     const rel = relative(this.repoRoot, absPath);
