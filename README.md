@@ -190,7 +190,7 @@ This is the path that's actually been live-tested end-to-end with real Claude Co
 
 The hook reads the worktree's own `.agent-sync.yml` for `server` and `paths.exclusive` (hot files routed through the lock service instead of CRDT merge alone). `AGENT_SYNC_SERVER` and `AGENT_SYNC_EXCLUSIVE_PATHS` (comma-separated relative paths), set as env vars in the hook command, override those two fields if you'd rather not keep a config file in the worktree.
 
-Edit/Write/Bash hook payloads must include matching `session_id` and `tool_use_id` values in the pre/post pair. Snapshots are isolated by workspace, session, tool call, and file path. Read hooks refresh disk without creating a snapshot. A missing snapshot is reported as a hook warning instead of being treated as an empty file.
+Edit/Write/Bash hook payloads must include matching `session_id` and `tool_use_id` values in the pre/post pair. Snapshots are isolated by workspace, session, tool call, and file path. Read hooks refresh disk without creating a snapshot. A missing snapshot is a blocking hook failure instead of being treated as an empty file.
 
 Each flush commits only its target path, leaving unrelated staged changes staged. If validation rejects a flush, the service restores the exact pre-flush disk contents (including uncommitted changes), or removes the file only if it was absent before the flush. Failed Git operations leave the content eligible for retry through `flushPath()` or `flushAll()`.
 
@@ -203,14 +203,14 @@ Each flush commits only its target path, leaving unrelated staged changes staged
 
 ### Manual Codex hook setup (advanced)
 
-The Codex adapter uses the same worktree and server layout as the Claude Code bridge above, but observes Codex's canonical `apply_patch` and `Bash` hook events:
+The Codex adapter uses the same worktree and server layout as the Claude Code bridge above. Its wildcard `PreToolUse` hook refreshes active shared rooms before every supported local tool, while `apply_patch` and `Bash` additionally use post-tool workspace diffing to publish writes:
 
 1. In the canonical (main) checkout, copy [examples/codexHookSettings.example.json](examples/codexHookSettings.example.json) to `.codex/hooks.json` and replace the two absolute paths. Codex resolves project hooks for linked Git worktrees from this main worktree, so a copy that exists only inside a linked worktree is not loaded.
 2. Start the server with the canonical checkout as its repo root.
 3. Start Codex in each linked worktree, open `/hooks`, and trust the canonical project hook definition.
-4. Use Codex normally. Before each `apply_patch` or shell call, the hook pulls active rooms and snapshots that agent's worktree; afterward it pushes changed, new, and deleted text files through exact-match-or-reject synchronization.
+4. Use Codex normally. Before each supported local tool call, the hook pulls active rooms so shell, MCP, and other local reads see current shared files. Before `apply_patch` or a shell call it also snapshots the worktree; afterward it pushes changed, new, and deleted text files through exact-match-or-reject synchronization.
 
-The adapter reads `.agent-sync.yml` and honors the same `AGENT_SYNC_SERVER` and `AGENT_SYNC_EXCLUSIVE_PATHS` overrides as the Claude bridge. Codex `apply_patch` and shell-command deletions create synchronized tombstones: stale deletions reject and restore current content, while a writer that has observed the tombstone may recreate the path. Binary files, files over 1 MB, changes from processes that outlive the command, and calls on specialized tool paths that bypass Codex hooks are not synchronized. Hook configuration under `.codex/` is always excluded from workspace scanning.
+The adapter reads `.agent-sync.yml` and honors the same `AGENT_SYNC_SERVER` and `AGENT_SYNC_EXCLUSIVE_PATHS` overrides as the Claude bridge. Codex `apply_patch` and shell-command deletions create synchronized tombstones: stale deletions reject and restore current content, while a writer that has observed the tombstone may recreate the path. A status lookup or sync failure blocks the tool with actionable stderr instead of silently proceeding against stale disk. Binary files, files over 1 MB, changes from processes that outlive the command, and calls on specialized tool paths that bypass Codex hooks are not synchronized. Hook configuration under `.codex/` is always excluded from workspace scanning.
 
 ## Testing this project itself
 

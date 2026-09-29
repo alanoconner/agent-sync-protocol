@@ -7,6 +7,8 @@ describe("ASL agent launch configuration", () => {
     expect(values).toHaveLength(2);
     expect(values[0]).toContain("hooks.PreToolUse");
     expect(values[1]).toContain("hooks.PostToolUse");
+    expect(values[0]).toContain('matcher="*"');
+    expect(values[1]).toContain('matcher="^(apply_patch|Bash)$"');
     expect(values.join(" ")).toContain("'_hook' 'codex'");
     expect(values.join(" ")).toContain("command_windows=");
     expect(values.join(" ")).toContain('\\"_hook\\" \\"codex\\"');

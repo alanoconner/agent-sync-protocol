@@ -51,17 +51,47 @@ function materialize(filePath: string, state: SyncedFileState, lineEndings: Line
 }
 
 async function fetchRoomNames(serverUrl: string): Promise<string[]> {
+  const statusUrl = statusUrlFor(serverUrl);
+  let response: Response;
   try {
-    const response = await fetch(statusUrlFor(serverUrl), { signal: AbortSignal.timeout(2000) });
-    if (!response.ok) return [];
-    const body = (await response.json()) as { rooms?: { docName: string }[] };
-    return (body.rooms ?? []).map((room) => room.docName);
-  } catch { return []; }
+    response = await fetch(statusUrl, { signal: AbortSignal.timeout(2000) });
+  } catch (error) {
+    throw new Error(`cannot query sync status at ${statusUrl}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
+  if (!response.ok) throw new Error(`sync status request failed at ${statusUrl}: HTTP ${response.status} ${response.statusText}`.trim());
+
+  let body: unknown;
+  try { body = await response.json(); }
+  catch (error) {
+    throw new Error(`sync status response at ${statusUrl} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
+  if (!body || typeof body !== "object" || !("rooms" in body) || !Array.isArray(body.rooms)) {
+    throw new Error(`sync status response at ${statusUrl} does not contain a rooms array`);
+  }
+  const rooms = body.rooms as unknown[];
+  if (!rooms.every((room) => room !== null && typeof room === "object" && "docName" in room && typeof room.docName === "string")) {
+    throw new Error(`sync status response at ${statusUrl} contains an invalid room entry`);
+  }
+  return rooms.map((room) => (room as { docName: string }).docName);
 }
 
 function runIdFor(identity: SnapshotIdentity): string {
   if (!identity.sessionId || !identity.toolUseId) throw new Error("Hook requires session_id and tool_use_id.");
   return createHash("sha256").update(JSON.stringify([identity.sessionId, identity.toolUseId])).digest("hex");
+}
+
+async function pullRooms(
+  ops: SyncFileOps,
+  scanner: WorkspaceScanner,
+  workspaceRoot: string,
+  serverUrl: string,
+  lineEndings: LineEndingStyle,
+): Promise<void> {
+  const docNames = (await fetchRoomNames(serverUrl)).filter((docName) => {
+    const absolutePath = resolve(workspaceRoot, docName);
+    return toDocName(workspaceRoot, absolutePath) === docName && !scanner.isExcluded(docName);
+  });
+  await Promise.all(docNames.map(async (docName) => materialize(join(workspaceRoot, docName), await ops.readFileState(docName), lineEndings)));
 }
 
 async function pullRoomsAndSnapshot(
@@ -72,11 +102,7 @@ async function pullRoomsAndSnapshot(
   serverUrl: string,
   lineEndings: LineEndingStyle,
 ): Promise<void> {
-  const docNames = (await fetchRoomNames(serverUrl)).filter((docName) => {
-    const absolutePath = resolve(workspaceRoot, docName);
-    return toDocName(workspaceRoot, absolutePath) === docName && !scanner.isExcluded(docName);
-  });
-  await Promise.all(docNames.map(async (docName) => materialize(join(workspaceRoot, docName), await ops.readFileState(docName), lineEndings)));
+  await pullRooms(ops, scanner, workspaceRoot, serverUrl, lineEndings);
   scanner.saveRun(runIdFor(identity), scanner.snapshot());
 }
 
@@ -138,15 +164,21 @@ async function publishWorkspace(
 }
 
 async function runCodex(mode: HookMode, input: HookInput, env: NodeJS.ProcessEnv): Promise<number> {
-  if (input.tool_name !== "apply_patch" && input.tool_name !== "Bash") return 0;
+  const publishesWorkspace = input.tool_name === "apply_patch" || input.tool_name === "Bash";
+  if (mode === "post" && !publishesWorkspace) return 0;
   const workspaceRoot = findWorkspaceRoot(input.cwd ?? process.cwd(), { ...env, CLAUDE_PROJECT_DIR: "" });
   const identity = { workspaceRoot, sessionId: input.session_id, toolUseId: input.tool_use_id };
   const { options, ignore, lineEndings } = hookConfig(input.session_id ?? workspaceRoot, workspaceRoot, env);
   const ops = new SyncFileOps(options);
   const scanner = new WorkspaceScanner(workspaceRoot, ignore);
   try {
-    if (mode === "pre") await pullRoomsAndSnapshot(ops, scanner, workspaceRoot, identity, options.serverUrl, lineEndings);
-    else if (!(await publishWorkspace(ops, scanner, workspaceRoot, identity, lineEndings))) return 2;
+    if (mode === "pre") {
+      if (publishesWorkspace) await pullRoomsAndSnapshot(ops, scanner, workspaceRoot, identity, options.serverUrl, lineEndings);
+      else await pullRooms(ops, scanner, workspaceRoot, options.serverUrl, lineEndings);
+    } else if (!(await publishWorkspace(ops, scanner, workspaceRoot, identity, lineEndings))) {
+      console.error(`agent-sync codex PostToolUse failed for ${input.tool_name}: one or more workspace changes were rejected; affected files were restored to shared state.`);
+      return 2;
+    }
     return 0;
   } finally { await ops.close(); }
 }
@@ -182,11 +214,15 @@ async function runClaude(mode: HookMode, input: HookInput, env: NodeJS.ProcessEn
 }
 
 export async function runHook(agent: HookAgent, mode: HookMode, raw: string, env: NodeJS.ProcessEnv = process.env): Promise<number> {
+  let toolName: string | undefined;
   try {
     const input = (raw.trim() ? JSON.parse(raw) : {}) as HookInput;
+    toolName = input.tool_name;
     return agent === "codex" ? await runCodex(mode, input, env) : await runClaude(mode, input, env);
   } catch (error) {
-    console.error(`agent-sync ${agent} hook warning: ${error instanceof Error ? error.message : String(error)}`);
+    const phase = mode === "pre" ? "PreToolUse" : "PostToolUse";
+    const target = toolName ? ` for ${toolName}` : "";
+    console.error(`agent-sync ${agent} ${phase} failed${target}: ${error instanceof Error ? error.message : String(error)}`);
     // Infrastructure failures are not safe to wave through: the tool may
     // otherwise report success even though its CRDT update was never durably
     // accepted. Ordinary scanner warnings are handled inside the workflow.

@@ -18,7 +18,7 @@ export function codexHookOverrides(): string[] {
   const pre = hookCommands("codex", "pre");
   const post = hookCommands("codex", "post");
   return [
-    `hooks.PreToolUse=[{matcher="^(apply_patch|Bash)$",hooks=[{type="command",command=${JSON.stringify(pre.posix)},command_windows=${JSON.stringify(pre.windows)},statusMessage="Refreshing shared workspace state"}]}]`,
+    `hooks.PreToolUse=[{matcher="*",hooks=[{type="command",command=${JSON.stringify(pre.posix)},command_windows=${JSON.stringify(pre.windows)},statusMessage="Refreshing shared workspace state"}]}]`,
     `hooks.PostToolUse=[{matcher="^(apply_patch|Bash)$",hooks=[{type="command",command=${JSON.stringify(post.posix)},command_windows=${JSON.stringify(post.windows)},statusMessage="Publishing workspace changes"}]}]`,
   ];
 }

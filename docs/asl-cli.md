@@ -77,9 +77,9 @@ Arguments for the underlying agent must follow `--`. ASL owns the working direct
 
 ### Hook coverage
 
-- Codex: `apply_patch` and `Bash` pre/post events use a workspace snapshot and diff.
+- Codex: every supported local tool gets a pre-tool refresh; `apply_patch` and `Bash` additionally use a workspace snapshot and post-tool diff.
 - Claude Code: `Read`, `Edit`, and `Write` use direct file snapshots; `Bash` uses the workspace snapshot and diff.
-- Before a covered operation, hooks pull existing shared rooms into that agent's worktree.
+- Before a covered operation, hooks pull existing shared rooms into that agent's worktree. Status lookup, decoding, or synchronization failure blocks the operation rather than treating the shared-room list as empty.
 - After a write, hooks publish changed or new text files with exact-match-or-reject semantics. A stale overlapping edit is rejected and the local file is restored to current shared truth.
 - The daemon's repository root is the integration worktree. It hydrates new rooms from that worktree and commits successfully flushed documents there.
 
@@ -258,7 +258,7 @@ Session mutations use an owner-recorded repository lock. If an ASL process is in
 - A process that changes files after its `Bash` tool call has returned is outside the corresponding post-hook snapshot.
 - Specialized agent tools that bypass the covered hooks are not synchronized.
 - Rooms are hydrated once. Direct disk changes made behind a live daemon are not automatically reconciled into an already-open room.
-- Hook infrastructure and durability errors fail the covered tool operation instead of reporting success for an update the server did not acknowledge. Check agent output and `daemon.log` for the underlying storage or connection error.
+- Hook infrastructure, status discovery, and durability errors fail the covered tool operation instead of reporting success against stale or unacknowledged state. Codex receives the hook phase, tool name, and underlying cause through its normal blocking feedback; check agent output and `daemon.log` for server-side detail.
 
 ## Internal commands
 

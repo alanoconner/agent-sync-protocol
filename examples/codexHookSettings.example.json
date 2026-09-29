@@ -1,9 +1,9 @@
 {
-  "description": "Route Codex apply_patch and shell writes through agent-sync.",
+  "description": "Refresh shared files before Codex local tools and route apply_patch and shell writes through agent-sync.",
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "^(apply_patch|Bash)$",
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",
