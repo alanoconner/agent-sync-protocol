@@ -87,11 +87,14 @@ mappings:
   - tool: "read_file"
     op: read
     path_param: "path"
+  - tool: "delete_file"
+    op: delete
+    path_param: "path"
 ```
 
 The proxy shapes the *response* back into whatever format that specific tool would normally return, so a mapped call's success response looks exactly like the real server's — extending the Section 3.5 error-shape-preservation principle to success responses too.
 
-**Why this protects core logic:** the CRDT engine, awareness channel, symbol index, and validation gate only ever see normalized `editFile(path, content)` / `readFile(path)` calls. They have no dependency on which MCP server or tool name produced that call. Supporting a server no one's tested against yet means writing a mapping entry, not touching the sync engine — unmapped tools pass through by default rather than breaking, so an unrecognized server degrades to "no sync for this tool" instead of failing outright.
+**Why this protects core logic:** the CRDT engine, awareness channel, symbol index, and validation gate only ever see normalized `editFile(path, content)` / `readFile(path)` / `deleteFile(path)` calls. They have no dependency on which MCP server or tool name produced that call. Supporting a server no one's tested against yet means writing a mapping entry, not touching the sync engine — unmapped tools pass through by default rather than breaking, so an unrecognized server degrades to "no sync for this tool" instead of failing outright.
 
 Ship a small built-in library of mapping presets for common cases (a generic filesystem MCP server, Claude Code's tool names) so most setups need zero config; let anyone add an entry for something custom.
 
@@ -157,7 +160,7 @@ Claude Code Edit tool call
 - Codex's file-edit tool is `apply_patch`, and it's covered by both `PreToolUse` and `PostToolUse` (matchable as `apply_patch`, `Edit`, or `Write`). Same pre-sync-then-diff pattern applies: `PreToolUse` refreshes disk to the latest merged state before `apply_patch` runs; `PostToolUse` diffs the result and sends it to the sync server.
 - **Codex's `PreToolUse` supports outright denial** (`permissionDecision: "deny"` with a reason), which is stronger than Claude Code's pattern as described above — instead of only refreshing disk and relying on `apply_patch`'s own patch-context matching to fail on a stale edit, the hook can proactively check the sync server and block the call before it touches disk at all when a real conflict exists.
 - `apply_patch` operates on unified-diff-style patch text rather than Claude Code's `old_str`/`new_str` replace — its own patch-context matching plays the same role as the `range_replace` exact-match rule in Section 3.2 once disk is pre-synced to current state, so this still doesn't need a custom match implementation.
-- **Reference adapter:** `examples/codexHook.ts` handles canonical `apply_patch` and `Bash` events by pulling all active rooms and taking a command-agnostic workspace snapshot before the tool, then diffing and publishing changed/new text files afterward. It deliberately does not parse patch paths. `apply_patch` deletion operations are denied during `PreToolUse` because the current protocol has no file tombstone; silently applying a local-only deletion would violate the synchronization guarantee.
+- **Reference adapter:** `examples/codexHook.ts` handles canonical `apply_patch` and `Bash` events by pulling all active rooms and taking a command-agnostic workspace snapshot before the tool, then diffing and publishing changed/new/deleted text files afterward. It deliberately does not parse patch paths. File deletion creates an observed-remove tombstone: a stale snapshot deletion rejects, an unseen concurrent writer cannot clear the tombstone, and a writer that synchronizes after deletion may deliberately recreate the path.
 - **Real gap, not yet resolved: Codex's documented tool-coverage table does not list a hook path for plain file reads** — only `Bash`, `apply_patch`, MCP tools, and a small set of other named local function tools are covered. This means the "pre-sync disk before a read" half of the pattern (Section 3.1's read-path swap) may not be achievable for Codex the way it is for agents with a rebindable registry or an MCP proxy in front of them. Confirm directly against a running Codex instance before assuming read freshness is guaranteed; if it isn't, Codex agents may act on disk content that's stale relative to what's already merged elsewhere until the next flush.
 
 ### 3.4 Reference integration

@@ -78,7 +78,7 @@ describe("WorkspaceScanner", () => {
     expect(changes.find((c) => c.docName === "src/new.js")).toMatchObject({ before: "", after: "fresh\n", isNew: true });
   });
 
-  it("ignores unchanged files, touched-but-identical files, deletions, and binary files", () => {
+  it("reports text deletions while ignoring unchanged and binary modifications", () => {
     write("a.txt", "same");
     write("gone.txt", "bye");
     write("img.bin", Buffer.from([1, 2, 0, 3]));
@@ -88,7 +88,7 @@ describe("WorkspaceScanner", () => {
     write("a.txt", "same"); // rewritten with identical bytes: new mtime, same hash
     unlinkSync(join(root, "gone.txt"));
     write("img.bin", Buffer.from([9, 9, 0, 9]));
-    expect(s.changes(pre).changes).toEqual([]);
+    expect(s.changes(pre).changes).toEqual([{ kind: "delete", docName: "gone.txt", before: "bye" }]);
   });
 
   it("reuses the cached hash for unchanged files and still recovers 'before' after later scans", () => {

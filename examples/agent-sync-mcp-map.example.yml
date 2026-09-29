@@ -15,3 +15,6 @@ mappings:
   - tool: "read_file"
     op: read
     path_param: "path"
+  - tool: "delete_file"
+    op: delete
+    path_param: "path"

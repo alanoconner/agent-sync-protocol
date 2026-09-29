@@ -27,8 +27,8 @@ describe("Phase 7: dashboard view helpers", () => {
   it("formats rooms with peers and an unlocked file", () => {
     const status: ServerStatus = {
       rooms: [
-        { docName: "notes.txt", peers: [{ clientId: 1, state: { agentId: "agent-A" } }], lock: null },
-        { docName: "idle.txt", peers: [], lock: null },
+        { docName: "notes.txt", deleted: false, peers: [{ clientId: 1, state: { agentId: "agent-A" } }], lock: null },
+        { docName: "idle.txt", deleted: false, peers: [], lock: null },
       ],
     };
     expect(formatStatus(status)).toEqual(["notes.txt", "  agent-A", "idle.txt", "  (nobody)"]);
@@ -36,8 +36,12 @@ describe("Phase 7: dashboard view helpers", () => {
 
   it("flags a locked file with its owner", () => {
     const status: ServerStatus = {
-      rooms: [{ docName: "schema.ts", peers: [{ clientId: 1, state: { agentId: "agent-A" } }], lock: { ownerId: "agent-A", expiresAt: Date.now() + 5000 } }],
+      rooms: [{ docName: "schema.ts", deleted: false, peers: [{ clientId: 1, state: { agentId: "agent-A" } }], lock: { ownerId: "agent-A", expiresAt: Date.now() + 5000 } }],
     };
     expect(formatStatus(status)[0]).toBe("schema.ts [locked by agent-A]");
+  });
+
+  it("labels tombstoned rooms", () => {
+    expect(formatStatus({ rooms: [{ docName: "gone.ts", deleted: true, peers: [], lock: null }] })[0]).toBe("gone.ts [deleted]");
   });
 });

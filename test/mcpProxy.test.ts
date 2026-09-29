@@ -21,6 +21,7 @@ function createFakeFilesystemServer() {
         inputSchema: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
       },
       { name: "read_file", inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
+      { name: "delete_file", inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
       {
         name: "str_replace_based_edit_tool",
         inputSchema: {
@@ -103,7 +104,7 @@ describe("Phase 3: generic MCP proxy (Section 3.2)", () => {
 
   it("passes through the upstream tool list unchanged — the agent can't tell a proxy exists", async () => {
     const { tools } = await agentClient.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(["list_directory", "read_file", "str_replace_based_edit_tool", "write_file"]);
+    expect(tools.map((t) => t.name).sort()).toEqual(["delete_file", "list_directory", "read_file", "str_replace_based_edit_tool", "write_file"]);
   });
 
   it("diverts a mapped write_file call into the sync layer instead of the real upstream disk", async () => {
@@ -126,6 +127,18 @@ describe("Phase 3: generic MCP proxy (Section 3.2)", () => {
     const result = await agentClient.callTool({ name: "read_file", arguments: { path: "live.ts" } });
     expect(textOf(result)).toBe("content only the sync layer has");
     expect(fakeUpstream.disk.has("live.ts")).toBe(false);
+  });
+
+  it("diverts delete_file into a tombstone and returns ENOENT on later reads", async () => {
+    await agentClient.callTool({ name: "write_file", arguments: { path: "gone.ts", content: "remove me" } });
+    const deleted = await agentClient.callTool({ name: "delete_file", arguments: { path: "gone.ts" } });
+    expect(deleted.isError).toBeFalsy();
+    await vi.waitFor(() => expect(syncServer.getDocState("gone.ts")).toEqual({ exists: false, content: "" }));
+
+    const read = await agentClient.callTool({ name: "read_file", arguments: { path: "gone.ts" } });
+    expect(read.isError).toBe(true);
+    expect(textOf(read as CallToolResult)).toMatch(/^ENOENT:/);
+    expect(fakeUpstream.disk.has("gone.ts")).toBe(false);
   });
 
   it("passes an unmapped tool straight through to the real upstream server untouched", async () => {

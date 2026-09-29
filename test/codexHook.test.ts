@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -137,8 +137,8 @@ describe("Codex hook bridge", () => {
     expect(server.getDocContent("src/app.js")).not.toContain("\r");
   }, 60_000);
 
-  it("blocks apply_patch deletion before it can diverge from shared state", async () => {
-    const result = await runHook(
+  it("synchronizes apply_patch deletion and removes the file from another worktree", async () => {
+    const pre = await runHook(
       "pre",
       a,
       url,
@@ -147,8 +147,27 @@ describe("Codex hook bridge", () => {
       "apply_patch",
       "*** Begin Patch\n*** Delete File: src/app.js\n*** End Patch",
     );
-    expect(result.code).toBe(2);
-    expect(result.stderr).toContain("file deletion is not supported");
-    expect(readFileSync(join(a, "src", "app.js"), "utf8")).toBe(ORIGINAL);
-  });
+    expect(pre.code).toBe(0);
+    unlinkSync(join(a, "src", "app.js"));
+    expect((await runHook("post", a, url, "a1", "sa")).code).toBe(0);
+    expect(server.getDocState("src/app.js")).toEqual({ exists: false, content: "" });
+
+    expect((await runHook("pre", b, url, "b1", "sb")).code).toBe(0);
+    expect(existsSync(join(b, "src", "app.js"))).toBe(false);
+  }, 60_000);
+
+  it("rejects a stale deletion and restores the latest shared content", async () => {
+    expect((await runHook("pre", b, url, "stale-delete", "sb")).code).toBe(0);
+
+    expect((await runHook("pre", a, url, "newer-edit", "sa")).code).toBe(0);
+    writeFileSync(join(a, "src", "app.js"), ORIGINAL.replace("HEADER = 34", "HEADER = 99"));
+    expect((await runHook("post", a, url, "newer-edit", "sa")).code).toBe(0);
+
+    unlinkSync(join(b, "src", "app.js"));
+    const rejected = await runHook("post", b, url, "stale-delete", "sb");
+    expect(rejected.code).toBe(2);
+    expect(rejected.stderr).toContain("modified concurrently");
+    expect(readFileSync(join(b, "src", "app.js"), "utf8")).toContain("HEADER = 99");
+    expect(server.getDocState("src/app.js")?.exists).toBe(true);
+  }, 90_000);
 });

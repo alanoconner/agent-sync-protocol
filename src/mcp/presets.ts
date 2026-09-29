@@ -17,6 +17,7 @@ export const genericFilesystemPreset: MappingConfig = {
       range_params: ["old_str"],
     },
     { tool: "read_file", op: "read", path_param: "path" },
+    { tool: "delete_file", op: "delete", path_param: "path" },
   ],
 };
 

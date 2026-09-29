@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type * as Y from "yjs";
 import { SyncClient } from "../client/SyncClient.js";
+import { clearObservedTombstones, getSyncedFileState, type SyncedFileState, TOMBSTONE_MAP_NAME } from "./fileState.js";
 import { toLf } from "./lineEndings.js";
 import { applyContentDiff, computeMinimalReplacement } from "./textMerge.js";
 
@@ -21,6 +22,14 @@ export class RangeMismatchError extends Error {
         : `The expected text appears more than once in "${path}" and the edit's target location is ambiguous. Re-read the file and recompute the edit; do not retry the same replacement unchanged.`,
     );
     this.name = "RangeMismatchError";
+  }
+}
+
+export class FileNotFoundError extends Error {
+  readonly code = "ENOENT";
+  constructor(path: string) {
+    super(`No such synchronized file: "${path}".`);
+    this.name = "FileNotFoundError";
   }
 }
 
@@ -144,8 +153,14 @@ export class SyncFileOps {
   }
 
   async readFile(path: string): Promise<string> {
+    const state = await this.readFileState(path);
+    if (!state.exists) throw new FileNotFoundError(path);
+    return state.content;
+  }
+
+  async readFileState(path: string): Promise<SyncedFileState> {
     const client = await this.getClient(path);
-    return client.getText().toString();
+    return getSyncedFileState(client.doc);
   }
 
   /**
@@ -161,9 +176,8 @@ export class SyncFileOps {
   }
 
   /**
-   * Section 3.6's "Write rejected" message is specifically about writes, so
-   * only the write paths consume the pending-rejection notice — a plain
-   * read should keep returning current content unconditionally.
+   * Section 3.6's rejection message is about mutations, so reads never
+   * consume it; writes, recreation, and deletion do.
    */
   private consumePendingRejection(client: SyncClient): void {
     const map = client.doc.getMap<string>(VALIDATION_MAP_NAME);
@@ -174,7 +188,7 @@ export class SyncFileOps {
   }
 
   /**
-   * Gates a write behind the path's lock lease, for `exclusivePaths` only —
+   * Gates a mutation behind the path's lock lease, for `exclusivePaths` only —
    * everything else runs `fn` directly with no lock-service round trip at
    * all. Scoped to exactly one write: acquires immediately before `fn`,
    * releases in a `finally` immediately after, rather than holding a lease
@@ -207,7 +221,10 @@ export class SyncFileOps {
     const client = await this.getClient(path);
     await this.withExclusiveLock(path, client, () => {
       this.consumePendingRejection(client);
-      applyContentDiff(client.getText(), toLf(content));
+      client.doc.transact(() => {
+        clearObservedTombstones(client.doc);
+        applyContentDiff(client.getText(), toLf(content));
+      });
     });
   }
 
@@ -222,13 +239,25 @@ export class SyncFileOps {
    * If a concurrent edit touched the exact span this write meant to change,
    * the whole write is rejected rather than guessing.
    */
-  async writeFileFromSnapshot(path: string, oldSnapshot: string, newContent: string): Promise<void> {
+  async writeFileFromSnapshot(path: string, oldSnapshot: string | null, newContent: string): Promise<void> {
     const client = await this.getClient(path);
     await this.withExclusiveLock(path, client, () => {
       this.consumePendingRejection(client);
       const ytext = client.getText();
-      const normalizedOldSnapshot = toLf(oldSnapshot);
       const normalizedNewContent = toLf(newContent);
+      const deleted = client.doc.getMap<boolean>(TOMBSTONE_MAP_NAME).size > 0;
+
+      if (oldSnapshot === null) {
+        if (!deleted) throw new RangeMismatchError(path, "not_found");
+        client.doc.transact(() => {
+          clearObservedTombstones(client.doc);
+          applyContentDiff(ytext, normalizedNewContent);
+        });
+        return;
+      }
+
+      if (deleted) throw new RangeMismatchError(path, "not_found");
+      const normalizedOldSnapshot = toLf(oldSnapshot);
       if (normalizedOldSnapshot === normalizedNewContent) return;
 
       if (ytext.toString() === normalizedOldSnapshot) {
@@ -256,7 +285,31 @@ export class SyncFileOps {
     const client = await this.getClient(path);
     await this.withExclusiveLock(path, client, () => {
       this.consumePendingRejection(client);
+      if (client.doc.getMap<boolean>(TOMBSTONE_MAP_NAME).size > 0) throw new FileNotFoundError(path);
       applyExactReplace(client.getText(), path, toLf(oldStr), toLf(newStr));
+    });
+  }
+
+  /** Deletes the path's current synchronized state. */
+  async deleteFile(path: string): Promise<void> {
+    const client = await this.getClient(path);
+    const state = getSyncedFileState(client.doc);
+    if (!state.exists) throw new FileNotFoundError(path);
+    await this.deleteWithClient(path, client, state.content);
+  }
+
+  /** Deletes only if the live file still exactly matches the caller's snapshot. */
+  async deleteFileFromSnapshot(path: string, oldSnapshot: string): Promise<void> {
+    const client = await this.getClient(path);
+    await this.deleteWithClient(path, client, toLf(oldSnapshot));
+  }
+
+  private async deleteWithClient(path: string, client: SyncClient, expectedContent: string): Promise<void> {
+    await this.withExclusiveLock(path, client, () => {
+      this.consumePendingRejection(client);
+      const state = getSyncedFileState(client.doc);
+      if (!state.exists || state.content !== expectedContent) throw new RangeMismatchError(path, "not_found");
+      client.doc.getMap<boolean>(TOMBSTONE_MAP_NAME).set(randomUUID(), true);
     });
   }
 

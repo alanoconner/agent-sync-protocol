@@ -15,6 +15,7 @@ describe("Phase 3: MCP mapping config", () => {
         range_params: ["old_str"],
       },
       { tool: "read_file", op: "read", path_param: "path" },
+      { tool: "delete_file", op: "delete", path_param: "path" },
     ]);
   });
 
@@ -52,6 +53,15 @@ mappings:
     path_param: "path"
 `),
     ).toThrow(/op/);
+  });
+
+  it("parses an explicit delete mapping without content parameters", () => {
+    expect(parseMappingConfig(`
+mappings:
+  - tool: delete_file
+    op: delete
+    path_param: path
+`).mappings).toEqual([{ tool: "delete_file", op: "delete", path_param: "path" }]);
   });
 
   it("rejects a config with no top-level mappings array", () => {

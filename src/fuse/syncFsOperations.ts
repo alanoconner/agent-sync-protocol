@@ -3,7 +3,7 @@ import { SyncFileOps, type SyncFileOpsOptions } from "../sync/syncFileOps.js";
 interface OpenFile {
   path: string;
   /** What this fd believed the file contained as of its last flush (or open) — the honest before/after baseline used by writeFileFromSnapshot. */
-  snapshot: string;
+  snapshot: string | null;
   /** The fd's current in-memory view, mutated in place by read/write syscalls before being flushed. */
   buffer: Buffer;
 }
@@ -36,12 +36,13 @@ export class SyncFsOperations {
 
   /** Creates a new virtual file (or truncates an existing one to empty) and returns a fresh fd for it. */
   async create(path: string): Promise<number> {
-    return this.allocate(path, "");
+    const state = await this.ops.readFileState(path);
+    return this.allocate(path, state.exists ? state.content : null, "");
   }
 
-  private allocate(path: string, content: string): number {
+  private allocate(path: string, snapshot: string | null, content = snapshot ?? ""): number {
     const fd = nextFd++;
-    this.openFiles.set(fd, { path, snapshot: content, buffer: Buffer.from(content, "utf8") });
+    this.openFiles.set(fd, { path, snapshot, buffer: Buffer.from(content, "utf8") });
     return fd;
   }
 
@@ -98,7 +99,7 @@ export class SyncFsOperations {
   async flush(fd: number): Promise<void> {
     const file = this.requireOpen(fd);
     const newContent = file.buffer.toString("utf8");
-    if (newContent === file.snapshot) return;
+    if (file.snapshot !== null && newContent === file.snapshot) return;
     await this.ops.writeFileFromSnapshot(file.path, file.snapshot, newContent);
     file.snapshot = newContent;
   }
@@ -108,9 +109,8 @@ export class SyncFsOperations {
     this.openFiles.delete(fd);
   }
 
-  /** No dedicated CRDT-room deletion exists yet (that's later-phase territory) — modeled as clearing the file's content. */
   async unlink(path: string): Promise<void> {
-    await this.ops.writeFileFull(path, "");
+    await this.ops.deleteFile(path);
   }
 
   async readFileSnapshot(path: string): Promise<string> {

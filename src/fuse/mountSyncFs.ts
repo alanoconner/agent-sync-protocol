@@ -1,4 +1,4 @@
-import { LockDeniedError, RangeMismatchError } from "../sync/syncFileOps.js";
+import { FileNotFoundError, LockDeniedError, RangeMismatchError } from "../sync/syncFileOps.js";
 import { resolveSyncFileOpsOptions, type AgentSyncConfig } from "../config/agentSyncConfig.js";
 import { SyncFsOperations } from "./syncFsOperations.js";
 
@@ -17,9 +17,10 @@ export interface MountOptions {
 }
 
 /** Section 3.6's error-code table: a rejected merge is EAGAIN, a lock denial is EBUSY (Phase 6), anything else falls back to the generic EIO. */
-function toErrno(err: unknown, Fuse: { EAGAIN: number; EBUSY: number; EIO: number }): number {
+function toErrno(err: unknown, Fuse: { EAGAIN: number; EBUSY: number; EIO: number; ENOENT: number }): number {
   if (err instanceof RangeMismatchError) return Fuse.EAGAIN;
   if (err instanceof LockDeniedError) return Fuse.EBUSY;
+  if (err instanceof FileNotFoundError) return Fuse.ENOENT;
   return Fuse.EIO;
 }
 
@@ -129,7 +130,7 @@ export async function mountSyncFs(options: MountOptions): Promise<() => Promise<
       unlink(path, cb) {
         ops.unlink(stripLeadingSlash(path)).then(
           () => cb(0),
-          () => cb(Fuse.EIO),
+          (err) => cb(toErrno(err, Fuse)),
         );
       },
     },

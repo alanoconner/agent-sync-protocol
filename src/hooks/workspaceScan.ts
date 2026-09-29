@@ -11,7 +11,9 @@ export interface FileState {
   hash: string | null;
 }
 export type Manifest = Record<string, FileState>;
-export interface FileChange { docName: string; before: string; after: string; isNew: boolean }
+export type FileChange =
+  | { kind: "write"; docName: string; before: string; after: string; isNew: boolean }
+  | { kind: "delete"; docName: string; before: string };
 
 export const MAX_FILE_BYTES = 1_000_000;
 export const MAX_CHANGES_PER_CALL = 200;
@@ -133,7 +135,20 @@ export class WorkspaceScanner {
       if (now.hash === null || (previous && previous.hash === now.hash)) continue;
       const before = previous ? this.readObject(previous.hash as string) : "";
       if (before === undefined) { warnings.push(`${rel}: pre-command snapshot is unavailable — not synced.`); continue; }
-      changes.push({ docName: rel, before, after: readFileSync(join(this.workspaceRoot, rel), "utf8"), isNew: !previous });
+      changes.push({ kind: "write", docName: rel, before, after: readFileSync(join(this.workspaceRoot, rel), "utf8"), isNew: !previous });
+    }
+    for (const [rel, previous] of Object.entries(pre)) {
+      if (this.stat(rel)) continue;
+      if (previous.hash === null) {
+        warnings.push(`${rel}: deleted binary or oversized file is not synced.`);
+        continue;
+      }
+      const before = this.readObject(previous.hash);
+      if (before === undefined) {
+        warnings.push(`${rel}: pre-command snapshot is unavailable — deletion not synced.`);
+        continue;
+      }
+      changes.push({ kind: "delete", docName: rel, before });
     }
     if (changes.length > MAX_CHANGES_PER_CALL) {
       warnings.push(`${changes.length} files changed; syncing only the first ${MAX_CHANGES_PER_CALL}.`);

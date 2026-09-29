@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -89,4 +89,31 @@ describe("Claude Code hook bridge — Bash calls (command-agnostic workspace dif
     expect(server.getDocNames()).toEqual(["src/made.js"]);
     expect(server.getDocContent("src/made.js")).toBe("made();\n");
   }, 60_000);
+
+  it("syncs a command-driven deletion and permits recreation after observing it", async () => {
+    expect((await runHook("pre", a, url, "delete-1", "sa")).code).toBe(0);
+    unlinkSync(join(a, "src", "app.js"));
+    expect((await runHook("post", a, url, "delete-1", "sa")).code).toBe(0);
+    expect(server.getDocState("src/app.js")).toEqual({ exists: false, content: "" });
+
+    expect((await runHook("pre", b, url, "recreate-1", "sb")).code).toBe(0);
+    expect(existsSync(join(b, "src", "app.js"))).toBe(false);
+    writeFileSync(join(b, "src", "app.js"), "recreated\n");
+    expect((await runHook("post", b, url, "recreate-1", "sb")).code).toBe(0);
+    expect(server.getDocState("src/app.js")).toEqual({ exists: true, content: "recreated\n" });
+  }, 60_000);
+
+  it("does not let a stale command write resurrect a concurrently deleted file", async () => {
+    expect((await runHook("pre", b, url, "stale-write", "sb")).code).toBe(0);
+
+    expect((await runHook("pre", a, url, "delete-2", "sa")).code).toBe(0);
+    unlinkSync(join(a, "src", "app.js"));
+    expect((await runHook("post", a, url, "delete-2", "sa")).code).toBe(0);
+
+    writeFileSync(join(b, "src", "app.js"), ORIGINAL.replace("HEADER = 34", "HEADER = 77"));
+    const rejected = await runHook("post", b, url, "stale-write", "sb");
+    expect(rejected.code).toBe(2);
+    expect(existsSync(join(b, "src", "app.js"))).toBe(false);
+    expect(server.getDocState("src/app.js")).toEqual({ exists: false, content: "" });
+  }, 90_000);
 });

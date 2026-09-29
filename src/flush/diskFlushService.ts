@@ -3,6 +3,7 @@ import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { simpleGit, type SimpleGit } from "simple-git";
 import type { DocHydratedEvent, DocUpdateEvent, SyncServer } from "../server/syncServer.js";
 import { fromLf, type LineEndingStyle } from "../sync/lineEndings.js";
+import type { SyncedFileState } from "../sync/fileState.js";
 import { ValidationGateService } from "../validation/validationGateService.js";
 
 export interface DiskFlushServiceOptions {
@@ -30,6 +31,10 @@ function formatRejectionMessage(command: string): string {
   return `Write rejected: the combined change failed validation (\`${command}\`). Re-read the current file state before retrying.`;
 }
 
+function sameState(a: SyncedFileState | undefined, b: SyncedFileState | undefined): boolean {
+  return a?.exists === b?.exists && a?.content === b?.content;
+}
+
 /**
  * Debounced disk flush + git commit-per-flush (spec Section 6), with LF
  * content converted to the configured on-disk line-ending style at the
@@ -50,9 +55,9 @@ export class DiskFlushService {
   private readonly git: SimpleGit;
   private readonly validation: ValidationGateService | undefined;
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
-  private readonly lastFlushedContent = new Map<string, string>();
-  /** Content last seen via `docUpdate`, distinct from `lastFlushedContent` — this is what gates *scheduling* a flush at all, so that a doc-internal change which isn't the file content (e.g. this service's own `_validation` rejection-notice write, Y.Map not Y.Text) doesn't re-trigger the debounce timer and loop back into validating the exact same rejected content forever. */
-  private readonly lastSeenContent = new Map<string, string>();
+  private readonly lastFlushedState = new Map<string, SyncedFileState>();
+  /** Logical state last seen via `docUpdate`, distinct from the last flushed state, so metadata-only document updates do not re-trigger validation forever. */
+  private readonly lastSeenState = new Map<string, SyncedFileState>();
   private readonly onDocUpdate: (event: DocUpdateEvent) => void;
   private readonly onDocHydrated: (event: DocHydratedEvent) => void;
   /**
@@ -74,9 +79,10 @@ export class DiskFlushService {
     this.git = options.git ?? simpleGit(this.repoRoot);
     this.validation = options.validation;
 
-    this.onDocUpdate = ({ docName, content }) => {
-      if (this.lastSeenContent.get(docName) === content) return;
-      this.lastSeenContent.set(docName, content);
+    this.onDocUpdate = ({ docName, exists, content }) => {
+      const state = { exists, content };
+      if (sameState(this.lastSeenState.get(docName), state)) return;
+      this.lastSeenState.set(docName, state);
       if (this.autoFlush) this.scheduleFlush(docName);
     };
     this.server.on("docUpdate", this.onDocUpdate);
@@ -86,9 +92,10 @@ export class DiskFlushService {
     // `docUpdate` nor a manual `flushAll()` re-writes and re-commits the same
     // bytes. Whether that on-disk content was itself committed is not this
     // service's concern: the next real edit will `git add` the whole file.
-    this.onDocHydrated = ({ docName, content }) => {
-      this.lastSeenContent.set(docName, content);
-      this.lastFlushedContent.set(docName, content);
+    this.onDocHydrated = ({ docName, exists, content }) => {
+      const state = { exists, content };
+      this.lastSeenState.set(docName, state);
+      this.lastFlushedState.set(docName, state);
     };
     this.server.on("docHydrated", this.onDocHydrated);
   }
@@ -133,9 +140,9 @@ export class DiskFlushService {
   }
 
   private async doFlush(docName: string): Promise<void> {
-    const content = this.server.getDocContent(docName);
-    if (content === undefined) return; // room no longer exists
-    if (this.lastFlushedContent.get(docName) === content) return;
+    const state = this.server.getDocState(docName);
+    if (state === undefined) return; // room no longer exists
+    if (sameState(this.lastFlushedState.get(docName), state)) return;
 
     const absPath = this.resolveWithinRepo(docName);
     // Roll back exactly what this flush replaced, without touching Git's index.
@@ -146,8 +153,12 @@ export class DiskFlushService {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
-    await mkdir(dirname(absPath), { recursive: true });
-    await writeFile(absPath, fromLf(content, this.lineEndings), "utf8");
+    if (state.exists) {
+      await mkdir(dirname(absPath), { recursive: true });
+      await writeFile(absPath, fromLf(state.content, this.lineEndings), "utf8");
+    } else {
+      await rm(absPath, { force: true });
+    }
 
     if (this.validation) {
       const result = await this.validation.run();
@@ -175,14 +186,14 @@ export class DiskFlushService {
     try {
       // Commit-per-flush per spec Section 6, for traceability of which agent's
       // edit landed when — squashing/rebasing this history is a later concern.
-      await this.git.commit(`agent-sync: flush ${docName}`, [pathspec], { "--only": null });
+      await this.git.commit(`agent-sync: ${state.exists ? "flush" : "delete"} ${docName}`, [pathspec], { "--only": null });
     } catch (err) {
       // The write above can still be a no-op from git's point of view (e.g.
       // content flushed once already got hand-committed outside this
       // service) — that's not a flush failure.
       if (!isNothingToCommitError(err)) throw err;
     }
-    this.lastFlushedContent.set(docName, content);
+    this.lastFlushedState.set(docName, state);
   }
 
   /** Undo only this flush, preserving pre-existing uncommitted content and staging. */
@@ -203,7 +214,7 @@ export class DiskFlushService {
 
   /** Docs whose live CRDT content has not reached a successful disk/Git flush yet. */
   getPendingDocNames(): string[] {
-    return this.server.getDocNames().filter((docName) => this.lastFlushedContent.get(docName) !== this.server.getDocContent(docName));
+    return this.server.getDocNames().filter((docName) => !sameState(this.lastFlushedState.get(docName), this.server.getDocState(docName)));
   }
 
   private resolveWithinRepo(docName: string): string {

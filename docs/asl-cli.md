@@ -243,7 +243,7 @@ Session mutations use an owner-recorded repository lock. If an ASL process is in
 ## Safety checks and limitations
 
 - A new session requires a clean checkout, a checked-out branch, and configured Git identity.
-- File deletion is not represented by the current protocol. Codex `apply_patch` deletion is blocked; shell deletion is not synchronized.
+- Text-file deletion is synchronized through tombstones. A stale deletion rejects rather than erasing newer content, and a path may be recreated after the writer observes the tombstone. Directory, binary, and oversized-file deletion remain outside hook coverage.
 - Workspace scanning skips binary files, files larger than 1 MB, and more than 200 changed files in one hook call.
 - A process that changes files after its `Bash` tool call has returned is outside the corresponding post-hook snapshot.
 - Specialized agent tools that bypass the covered hooks are not synchronized.

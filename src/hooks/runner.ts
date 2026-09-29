@@ -5,6 +5,7 @@ import { statusUrlFor } from "../cli/dashboardView.js";
 import { CONFIG_FILE_NAME, loadAgentSyncConfigOrDefault, resolveSyncFileOpsOptions } from "../config/agentSyncConfig.js";
 import { SyncFileOps, type SyncFileOpsOptions } from "../sync/syncFileOps.js";
 import { fromLf, type LineEndingStyle } from "../sync/lineEndings.js";
+import type { SyncedFileState } from "../sync/fileState.js";
 import { HookSnapshots, type SnapshotIdentity } from "./hookSnapshots.js";
 import { WorkspaceScanner } from "./workspaceScan.js";
 import { findWorkspaceRoot, toDocName } from "./workspaceRoot.js";
@@ -37,8 +38,12 @@ function hookConfig(ownerId: string, workspaceRoot: string, env: NodeJS.ProcessE
   return { options, ignore: config.paths.ignore, lineEndings: config.lineEndings };
 }
 
-function materialize(filePath: string, content: string, lineEndings: LineEndingStyle): void {
-  const diskContent = fromLf(content, lineEndings);
+function materialize(filePath: string, state: SyncedFileState, lineEndings: LineEndingStyle): void {
+  if (!state.exists) {
+    rmSync(filePath, { force: true });
+    return;
+  }
+  const diskContent = fromLf(state.content, lineEndings);
   const exists = existsSync(filePath);
   if (exists ? readFileSync(filePath, "utf8") === diskContent : diskContent === "") return;
   mkdirSync(dirname(filePath), { recursive: true });
@@ -71,7 +76,7 @@ async function pullRoomsAndSnapshot(
     const absolutePath = resolve(workspaceRoot, docName);
     return toDocName(workspaceRoot, absolutePath) === docName && !scanner.isExcluded(docName);
   });
-  await Promise.all(docNames.map(async (docName) => materialize(join(workspaceRoot, docName), await ops.readFile(docName), lineEndings)));
+  await Promise.all(docNames.map(async (docName) => materialize(join(workspaceRoot, docName), await ops.readFileState(docName), lineEndings)));
   scanner.saveRun(runIdFor(identity), scanner.snapshot());
 }
 
@@ -79,19 +84,35 @@ async function pushWrite(
   ops: SyncFileOps,
   workspaceRoot: string,
   docName: string,
-  before: string,
+  before: string | null,
   after: string,
   isNew: boolean,
   lineEndings: LineEndingStyle,
 ): Promise<boolean> {
   try {
-    await ops.writeFileFromSnapshot(docName, before, after);
+    await ops.writeFileFromSnapshot(docName, isNew ? null : before, after);
     return true;
   } catch (error) {
-    const current = await ops.readFile(docName);
+    const current = await ops.readFileState(docName);
     const filePath = join(workspaceRoot, docName);
-    if (isNew && current === "") rmSync(filePath, { force: true });
-    else writeFileSync(filePath, fromLf(current, lineEndings), "utf8");
+    materialize(filePath, current, lineEndings);
+    console.error(`${docName}: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
+
+async function pushDelete(
+  ops: SyncFileOps,
+  workspaceRoot: string,
+  docName: string,
+  before: string,
+  lineEndings: LineEndingStyle,
+): Promise<boolean> {
+  try {
+    await ops.deleteFileFromSnapshot(docName, before);
+    return true;
+  } catch (error) {
+    materialize(join(workspaceRoot, docName), await ops.readFileState(docName), lineEndings);
     console.error(`${docName}: ${error instanceof Error ? error.message : String(error)}`);
     return false;
   }
@@ -108,17 +129,16 @@ async function publishWorkspace(
   for (const warning of warnings) console.error(`agent-sync: ${warning}`);
   let accepted = true;
   for (const change of changes) {
-    accepted = (await pushWrite(ops, workspaceRoot, change.docName, change.before, change.after, change.isNew, lineEndings)) && accepted;
+    const published = change.kind === "delete"
+      ? await pushDelete(ops, workspaceRoot, change.docName, change.before, lineEndings)
+      : await pushWrite(ops, workspaceRoot, change.docName, change.before, change.after, change.isNew, lineEndings);
+    accepted = published && accepted;
   }
   return accepted;
 }
 
 async function runCodex(mode: HookMode, input: HookInput, env: NodeJS.ProcessEnv): Promise<number> {
   if (input.tool_name !== "apply_patch" && input.tool_name !== "Bash") return 0;
-  if (mode === "pre" && input.tool_name === "apply_patch" && /^\*\*\* Delete File:/m.test(input.tool_input?.command ?? "")) {
-    console.error("agent-sync: apply_patch file deletion is not supported by the sync protocol; delete it outside this synchronized session.");
-    return 2;
-  }
   const workspaceRoot = findWorkspaceRoot(input.cwd ?? process.cwd(), { ...env, CLAUDE_PROJECT_DIR: "" });
   const identity = { workspaceRoot, sessionId: input.session_id, toolUseId: input.tool_use_id };
   const { options, ignore, lineEndings } = hookConfig(input.session_id ?? workspaceRoot, workspaceRoot, env);
@@ -149,8 +169,8 @@ async function runClaude(mode: HookMode, input: HookInput, env: NodeJS.ProcessEn
     const docName = toDocName(workspaceRoot, filePath);
     if (docName === null) return 0;
     if (mode === "pre") {
-      const remote = await ops.readFile(docName);
-      if (input.tool_name !== "Read") snapshots.stash(identity, docName, fromLf(remote, lineEndings));
+      const remote = await ops.readFileState(docName);
+      if (input.tool_name !== "Read") snapshots.stash(identity, docName, remote.exists ? fromLf(remote.content, lineEndings) : null);
       materialize(filePath, remote, lineEndings);
     } else if (input.tool_name !== "Read") {
       const before = snapshots.take(identity, docName);

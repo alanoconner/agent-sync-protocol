@@ -32,11 +32,11 @@ describe("createDiskHydrator (disk→CRDT seeding, in isolation)", () => {
   it("returns the working-tree content of <repoRoot>/<docName>, LF-normalized", async () => {
     await mkdir(join(repoDir, "src"), { recursive: true });
     await writeFile(join(repoDir, "src", "a.ts"), "one\r\ntwo\r\n", "utf8");
-    expect(createDiskHydrator(repoDir)("src/a.ts")).toBe("one\ntwo\n");
+    expect(createDiskHydrator(repoDir)("src/a.ts")).toEqual({ exists: true, content: "one\ntwo\n" });
   });
 
-  it("returns undefined for a file that doesn't exist, so the room starts empty as before", () => {
-    expect(createDiskHydrator(repoDir)("missing.ts")).toBeUndefined();
+  it("returns a tombstone for a file that doesn't exist", () => {
+    expect(createDiskHydrator(repoDir)("missing.ts")).toEqual({ exists: false, content: "" });
   });
 
   it("returns undefined for a directory rather than throwing", async () => {
@@ -113,25 +113,26 @@ describe("SyncServer hydration + DiskFlushService interplay", () => {
     expect(second.getText().toString()).toBe("v1"); // the room is the source of truth now, not disk
   });
 
-  it("a doc with no file on disk still starts empty", async () => {
+  it("a doc with no file on disk starts tombstoned", async () => {
     const client = makeClient("brand-new.ts");
     await client.connect();
     await client.whenSynced();
     expect(client.getText().toString()).toBe("");
+    expect(server.getDocState("brand-new.ts")).toEqual({ exists: false, content: "" });
   });
 
   it("emits docHydrated (not docUpdate) for seeded content, before any client is greeted", async () => {
     await writeFile(join(repoDir, "events.ts"), "seeded", "utf8");
-    const hydrated: { docName: string; content: string }[] = [];
+    const hydrated: { docName: string; exists: boolean; content: string }[] = [];
     const updated: string[] = [];
-    server.on("docHydrated", (e: { docName: string; content: string }) => hydrated.push(e));
+    server.on("docHydrated", (e: { docName: string; exists: boolean; content: string }) => hydrated.push(e));
     server.on("docUpdate", (e: { docName: string }) => updated.push(e.docName));
 
     const client = makeClient("events.ts");
     await client.connect();
     await client.whenSynced();
 
-    expect(hydrated).toEqual([{ docName: "events.ts", content: "seeded" }]);
+    expect(hydrated).toEqual([{ docName: "events.ts", exists: true, content: "seeded" }]);
     expect(updated).toEqual([]);
   });
 

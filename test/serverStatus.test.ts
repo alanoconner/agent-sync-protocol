@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SyncServer, type ServerStatus } from "../src/server/syncServer.js";
 import { SyncClient } from "../src/client/SyncClient.js";
+import { TOMBSTONE_MAP_NAME } from "../src/sync/fileState.js";
 
 describe("Phase 7: GET /status (dashboard data, Section 10)", () => {
   let server: SyncServer;
@@ -72,6 +73,18 @@ describe("Phase 7: GET /status (dashboard data, Section 10)", () => {
     status = await fetchStatus();
     room = status.rooms.find((r) => r.docName === "schema.ts");
     expect(room?.lock).toBeNull();
+  });
+
+  it("reports tombstoned rooms as deleted", async () => {
+    const client = makeClient("gone.ts");
+    await client.connect();
+    await client.whenSynced();
+    client.doc.getMap<boolean>(TOMBSTONE_MAP_NAME).set("status-test", true);
+
+    await vi.waitFor(async () => {
+      const room = (await fetchStatus()).rooms.find((entry) => entry.docName === "gone.ts");
+      expect(room?.deleted).toBe(true);
+    });
   });
 
   it("404s any other path", async () => {

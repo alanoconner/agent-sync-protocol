@@ -196,7 +196,7 @@ Each flush commits only its target path, leaving unrelated staged changes staged
 
 **Known limitations of this bridge** (see [CLAUDE.md](CLAUDE.md) for detail):
 - A rejected `Edit`/`Write` (concurrent edit, lock held, failed validation) reverts the local file and surfaces the error to the agent — expected behavior, not a failure.
-- A `Bash` call is covered by diffing the workspace before and after it (git-tracked plus untracked-but-not-ignored files, minus `paths.ignore`), so it works however the command changes a file — `sed`, a script, a formatter. What it cannot see: file deletions, binary or >1 MB files, and changes made by a process that keeps running after the command returns. Full coverage of those needs the FUSE mount instead.
+- A `Bash` call is covered by diffing the workspace before and after it (git-tracked plus untracked-but-not-ignored files, minus `paths.ignore`), so it works however the command changes a text file — `sed`, a script, a formatter, or deletion. Binary or >1 MB files and changes made by a process that keeps running after the command returns remain outside hook coverage.
 - A room is hydrated from the server's repo root once, when it's first created. A file changed on disk behind the server's back after that (a manual `git pull` in the canonical checkout, say) is not picked up until the server restarts — the room is the source of truth once it exists.
 
 ### Manual Codex hook setup (advanced)
@@ -206,9 +206,9 @@ The Codex adapter uses the same worktree and server layout as the Claude Code br
 1. In the canonical (main) checkout, copy [examples/codexHookSettings.example.json](examples/codexHookSettings.example.json) to `.codex/hooks.json` and replace the two absolute paths. Codex resolves project hooks for linked Git worktrees from this main worktree, so a copy that exists only inside a linked worktree is not loaded.
 2. Start the server with the canonical checkout as its repo root.
 3. Start Codex in each linked worktree, open `/hooks`, and trust the canonical project hook definition.
-4. Use Codex normally. Before each `apply_patch` or shell call, the hook pulls active rooms and snapshots that agent's worktree; afterward it pushes changed and new text files through exact-match-or-reject synchronization.
+4. Use Codex normally. Before each `apply_patch` or shell call, the hook pulls active rooms and snapshots that agent's worktree; afterward it pushes changed, new, and deleted text files through exact-match-or-reject synchronization.
 
-The adapter reads `.agent-sync.yml` and honors the same `AGENT_SYNC_SERVER` and `AGENT_SYNC_EXCLUSIVE_PATHS` overrides as the Claude bridge. Codex `apply_patch` deletions are blocked before execution because the current protocol has no file tombstone/delete operation. Shell-command deletions, binary files or files over 1 MB, changes from processes that outlive the command, and calls on specialized tool paths that bypass Codex hooks are not synchronized. Hook configuration under `.codex/` is always excluded from workspace scanning.
+The adapter reads `.agent-sync.yml` and honors the same `AGENT_SYNC_SERVER` and `AGENT_SYNC_EXCLUSIVE_PATHS` overrides as the Claude bridge. Codex `apply_patch` and shell-command deletions create synchronized tombstones: stale deletions reject and restore current content, while a writer that has observed the tombstone may recreate the path. Binary files, files over 1 MB, changes from processes that outlive the command, and calls on specialized tool paths that bypass Codex hooks are not synchronized. Hook configuration under `.codex/` is always excluded from workspace scanning.
 
 ## Testing this project itself
 

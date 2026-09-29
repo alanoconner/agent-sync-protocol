@@ -4,7 +4,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { SyncFileOps } from "../sync/syncFileOps.js";
 import { resolveSyncFileOpsOptions, type AgentSyncConfig } from "../config/agentSyncConfig.js";
-import type { MappingConfig, ReadMapping, WriteMapping } from "./mappingConfig.js";
+import type { DeleteMapping, MappingConfig, ReadMapping, WriteMapping } from "./mappingConfig.js";
 
 export interface McpSyncProxyOptions {
   /** Name/version this proxy presents both as an MCP server (to the agent) and MCP client (to the upstream server). */
@@ -36,6 +36,7 @@ export class McpSyncProxy {
   private readonly ops: SyncFileOps;
   private readonly writeMappings = new Map<string, WriteMapping>();
   private readonly readMappings = new Map<string, ReadMapping>();
+  private readonly deleteMappings = new Map<string, DeleteMapping>();
 
   constructor(options: McpSyncProxyOptions) {
     this.upstream = new Client({ name: `${options.serverInfo.name}-upstream-client`, version: options.serverInfo.version });
@@ -51,7 +52,8 @@ export class McpSyncProxy {
 
     for (const mapping of options.mapping.mappings) {
       if (mapping.op === "write") this.writeMappings.set(mapping.tool, mapping);
-      else this.readMappings.set(mapping.tool, mapping);
+      else if (mapping.op === "read") this.readMappings.set(mapping.tool, mapping);
+      else this.deleteMappings.set(mapping.tool, mapping);
     }
 
     // Same names, same schemas, same descriptions — the agent never knows a proxy exists.
@@ -78,6 +80,9 @@ export class McpSyncProxy {
 
     const read = this.readMappings.get(name);
     if (read) return this.handleMappedRead(read, args ?? {});
+
+    const deletion = this.deleteMappings.get(name);
+    if (deletion) return this.handleMappedDelete(deletion, args ?? {});
 
     // Unmapped tool: pure pass-through, request and response untouched.
     return this.upstream.callTool({ name, arguments: args }) as Promise<CallToolResult>;
@@ -110,6 +115,16 @@ export class McpSyncProxy {
     try {
       const content = await this.ops.readFile(path);
       return { content: [{ type: "text", text: content }] };
+    } catch (err) {
+      return this.toErrorResult(err);
+    }
+  }
+
+  private async handleMappedDelete(mapping: DeleteMapping, args: Record<string, unknown>): Promise<CallToolResult> {
+    const path = String(args[mapping.path_param]);
+    try {
+      await this.ops.deleteFile(path);
+      return { content: [{ type: "text", text: `Successfully deleted ${path}` }] };
     } catch (err) {
       return this.toErrorResult(err);
     }

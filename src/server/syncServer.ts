@@ -8,6 +8,7 @@ import * as decoding from "lib0/decoding";
 import { Observable } from "lib0/observable";
 import { MESSAGE_AWARENESS, MESSAGE_LOCK, MESSAGE_SYNC } from "../protocol/messageTypes.js";
 import type { LockRequestPayload, LockResponsePayload } from "../protocol/lockMessages.js";
+import { getSyncedFileState, TOMBSTONE_MAP_NAME, type SyncedFileState } from "../sync/fileState.js";
 
 // Phase 2: one Y.Doc + one Awareness instance per doc name ("room"), all in
 // memory, and no directory semantics beyond "doc name is whatever the
@@ -49,15 +50,15 @@ function toUint8Array(data: RawData): Uint8Array {
   return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
 }
 
-/** Emitted whenever any room's document content changes — {@link DiskFlushService} listens for this to drive its per-doc debounce. */
-export interface DocUpdateEvent {
+/** Emitted whenever a room's logical content or existence changes — {@link DiskFlushService} listens for this to drive its per-doc debounce. */
+export interface DocUpdateEvent extends SyncedFileState {
   docName: string;
-  content: string;
 }
 
 /** One room's snapshot for the Phase 7 dashboard (`GET /status`) — awareness peer states plus current lock, if any. */
 export interface RoomStatus {
   docName: string;
+  deleted: boolean;
   peers: { clientId: number; state: Record<string, unknown> | null }[];
   lock: { ownerId: string; expiresAt: number } | null;
 }
@@ -66,26 +67,24 @@ export interface ServerStatus {
   rooms: RoomStatus[];
 }
 
-/** Emitted once per room, immediately after `hydrate` seeded it with non-empty initial content — before any client has been greeted, so it never overlaps with a `docUpdate`. */
-export interface DocHydratedEvent {
+/** Emitted once per room after `hydrate` establishes its present or deleted disk state, before any client is greeted. */
+export interface DocHydratedEvent extends SyncedFileState {
   docName: string;
-  content: string;
 }
 
 export interface SyncServerOptions {
   /** Optional bind host. ASL-managed daemons use 127.0.0.1; omitted preserves the historical all-interface behavior. */
   host?: string;
   /**
-   * Initial content for a room that's being created for the first time —
-   * `undefined` (or an empty string) means "start empty," which is what every
-   * room did before this hook existed. Called exactly once per room, on
+   * Initial logical state for a room that's being created for the first time.
+   * `undefined` means use the historical present-but-empty default. Called exactly once per room, on
    * creation, synchronously and *before* the first client is greeted, so a
    * connecting client's sync-step-1 exchange already carries the seeded
    * content rather than racing against it. The server still has no idea what
    * a doc name means — `createDiskHydrator` (src/flush/diskHydration.ts) is
    * what treats it as a path under a repo root, from outside this class.
    */
-  hydrate?: (docName: string) => string | undefined;
+  hydrate?: (docName: string) => SyncedFileState | string | undefined;
 }
 
 export class SyncServer extends Observable<string> {
@@ -132,15 +131,20 @@ export class SyncServer extends Observable<string> {
       room = { doc, awareness, clients: new Map(), lock: null };
       this.rooms.set(name, room);
 
-      // Seed before the "update" handler below is attached: nobody is
+      // Hydrate before the "update" handler below is attached: nobody is
       // connected to a room that's being created right now, so there's no
       // one to broadcast to, and a `docUpdate` for content that by
       // definition is already on disk would only make DiskFlushService
-      // schedule a pointless no-op flush. `docHydrated` tells it instead.
-      const initial = this.hydrate?.(name);
+      // schedule a pointless no-op flush. `docHydrated` primes it instead.
+      const hydrated = this.hydrate?.(name);
+      const initial = typeof hydrated === "string" ? { exists: true, content: hydrated } : hydrated;
       if (initial) {
-        doc.getText("content").insert(0, initial);
-        this.emit("docHydrated", [{ docName: name, content: initial } satisfies DocHydratedEvent]);
+        if (initial.exists) {
+          if (initial.content) doc.getText("content").insert(0, initial.content);
+        } else {
+          doc.getMap<boolean>(TOMBSTONE_MAP_NAME).set("hydrated", true);
+        }
+        this.emit("docHydrated", [{ docName: name, ...initial } satisfies DocHydratedEvent]);
       }
 
       doc.on("update", (update: Uint8Array, origin: unknown) => {
@@ -153,7 +157,7 @@ export class SyncServer extends Observable<string> {
             client.send(message);
           }
         }
-        this.emit("docUpdate", [{ docName: name, content: doc.getText("content").toString() } satisfies DocUpdateEvent]);
+        this.emit("docUpdate", [{ docName: name, ...getSyncedFileState(doc) } satisfies DocUpdateEvent]);
       });
 
       awareness.on(
@@ -278,9 +282,16 @@ export class SyncServer extends Observable<string> {
     return Array.from(this.rooms.keys());
   }
 
-  /** Current merged content for a doc, or `undefined` if no room by that name has ever been created. */
+  /** Current logical state for a doc, or `undefined` if no room by that name has ever been created. */
+  getDocState(docName: string): SyncedFileState | undefined {
+    const room = this.rooms.get(docName);
+    return room ? getSyncedFileState(room.doc) : undefined;
+  }
+
+  /** Current merged content for a live doc; tombstoned and unknown docs return `undefined`. */
   getDocContent(docName: string): string | undefined {
-    return this.rooms.get(docName)?.doc.getText("content").toString();
+    const state = this.getDocState(docName);
+    return state?.exists ? state.content : undefined;
   }
 
   /** Recreates known rooms after a graceful daemon restart so hooks can pull their current disk-hydrated state. */
@@ -323,7 +334,7 @@ export class SyncServer extends Observable<string> {
         state: (state as Record<string, unknown> | null) ?? null,
       }));
       const lock = room.lock && room.lock.expiresAt > Date.now() ? { ownerId: room.lock.ownerId, expiresAt: room.lock.expiresAt } : null;
-      rooms.push({ docName, peers, lock });
+      rooms.push({ docName, deleted: !getSyncedFileState(room.doc).exists, peers, lock });
     }
     return { rooms };
   }

@@ -8,6 +8,7 @@ import { SyncClient } from "../src/client/SyncClient.js";
 import { DiskFlushService } from "../src/flush/diskFlushService.js";
 import { ValidationGateService } from "../src/validation/validationGateService.js";
 import { shellDisplayQuote } from "../src/cli/platform.js";
+import { TOMBSTONE_MAP_NAME } from "../src/sync/fileState.js";
 
 async function makeRepo(): Promise<{ dir: string; git: SimpleGit }> {
   const dir = await mkdtemp(join(tmpdir(), "agent-sync-flush-"));
@@ -237,4 +238,47 @@ describe("Phase 4: disk flush + git commit (Section 6)", () => {
     // The CRDT itself is untouched — still canonical LF.
     expect(client.getText().toString()).toBe("line1\nline2\n");
   });
+
+  it("removes and commits a tombstoned file", async () => {
+    await writeFile(join(repoDir, "gone.txt"), "tracked content");
+    await git.add("gone.txt");
+    await git.commit("initial");
+    flush = new DiskFlushService({ server, repoRoot: repoDir, git, autoFlush: false });
+
+    const client = makeClient("gone.txt");
+    await client.connect();
+    await client.whenSynced();
+    client.getText().insert(0, "tracked content");
+    client.doc.getMap<boolean>(TOMBSTONE_MAP_NAME).set("delete-test", true);
+    await vi.waitFor(() => expect(server.getDocState("gone.txt")).toEqual({ exists: false, content: "" }));
+
+    await flush.flushAll();
+    await expect(readFile(join(repoDir, "gone.txt"), "utf8")).rejects.toThrow();
+    expect((await git.log()).latest?.message).toBe("agent-sync: delete gone.txt");
+    await expect(git.show(["HEAD:gone.txt"])).rejects.toThrow();
+  });
+
+  it("restores deleted disk bytes when validation rejects the tombstone", async () => {
+    await writeFile(join(repoDir, "protected.txt"), "keep me");
+    await git.add("protected.txt");
+    await git.commit("initial");
+    const validation = new ValidationGateService({
+      command: `${shellDisplayQuote(process.execPath)} -e ${shellDisplayQuote("process.exit(1)")}`,
+      cwd: repoDir,
+      onFail: "reject_merge",
+    });
+    flush = new DiskFlushService({ server, repoRoot: repoDir, git, validation, autoFlush: false });
+
+    const client = makeClient("protected.txt");
+    await client.connect();
+    await client.whenSynced();
+    client.getText().insert(0, "keep me");
+    client.doc.getMap<boolean>(TOMBSTONE_MAP_NAME).set("delete-test", true);
+    await vi.waitFor(() => expect(server.getDocState("protected.txt")?.exists).toBe(false));
+
+    await flush.flushAll();
+    expect(await readFile(join(repoDir, "protected.txt"), "utf8")).toBe("keep me");
+    expect(flush.getPendingDocNames()).toContain("protected.txt");
+    expect((await git.log()).total).toBe(1);
+  }, 15_000);
 });

@@ -1,13 +1,14 @@
 import { readFileSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { toLf } from "../sync/lineEndings.js";
+import type { SyncedFileState } from "../sync/fileState.js";
 
-export type Hydrator = (docName: string) => string | undefined;
+export type Hydrator = (docName: string) => SyncedFileState | undefined;
 
 /**
  * Disk→CRDT hydration (the direction Phase 4's `DiskFlushService` never
  * covered). Returns a `SyncServer` `hydrate` callback that, when a room is
- * first created, seeds it with the current working-tree content of
+ * first created, seeds its existence and current working-tree content from
  * `<repoRoot>/<docName>` — so the first agent to touch an already-existing
  * file sees that file, not an empty doc. Lives next to `DiskFlushService`
  * because it shares the exact same convention ("a doc name is a path relative
@@ -21,8 +22,8 @@ export type Hydrator = (docName: string) => string | undefined;
  * hold for content that arrives from disk too. It is not a third line-ending
  * policy: disk-side style still lives only in `DiskFlushService`'s `fromLf`.
  *
- * Returns `undefined` (room starts empty, as before) when the file doesn't
- * exist, isn't a regular file, or the doc name would escape `repoRoot`.
+ * A missing path hydrates as a tombstone, while `undefined` is reserved for
+ * invalid paths or unreadable non-ENOENT entries.
  */
 export function createDiskHydrator(repoRoot: string): Hydrator {
   const root = resolve(repoRoot);
@@ -31,9 +32,9 @@ export function createDiskHydrator(repoRoot: string): Hydrator {
     const rel = relative(root, absPath);
     if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return undefined;
     try {
-      return toLf(readFileSync(absPath, "utf8"));
-    } catch {
-      // ENOENT, EISDIR, permission errors — all mean "nothing on disk to seed from."
+      return { exists: true, content: toLf(readFileSync(absPath, "utf8")) };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { exists: false, content: "" };
       return undefined;
     }
   };

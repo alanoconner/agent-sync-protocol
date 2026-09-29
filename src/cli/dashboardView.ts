@@ -23,7 +23,8 @@ export function formatStatus(status: ServerStatus): string[] {
   const lines: string[] = [];
   for (const room of status.rooms) {
     const lockLabel = room.lock ? ` [locked by ${room.lock.ownerId}]` : "";
-    lines.push(`${room.docName}${lockLabel}`);
+    const deletedLabel = room.deleted ? " [deleted]" : "";
+    lines.push(`${room.docName}${deletedLabel}${lockLabel}`);
     lines.push(`  ${room.peers.length > 0 ? room.peers.map(describePeer).join(", ") : "(nobody)"}`);
   }
   return lines;

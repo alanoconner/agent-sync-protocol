@@ -18,15 +18,15 @@ export class HookSnapshots {
     return join(this.directory, `${createHash("sha256").update(key).digest("hex")}.snapshot`);
   }
 
-  stash(identity: SnapshotIdentity, docName: string, content: string): void {
+  stash(identity: SnapshotIdentity, docName: string, content: string | null): void {
     const path = this.path(identity, docName);
     mkdirSync(this.directory, { recursive: true });
-    writeFileSync(path, content, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    writeFileSync(path, JSON.stringify({ content }), { encoding: "utf8", flag: "wx", mode: 0o600 });
   }
 
-  take(identity: SnapshotIdentity, docName: string): string {
+  take(identity: SnapshotIdentity, docName: string): string | null {
     const path = this.path(identity, docName);
-    const content = readFileSync(path, "utf8");
+    const { content } = JSON.parse(readFileSync(path, "utf8")) as { content: string | null };
     unlinkSync(path);
     return content;
   }

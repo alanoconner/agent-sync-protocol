@@ -19,7 +19,13 @@ export interface ReadMapping {
   path_param: string;
 }
 
-export type ToolMapping = WriteMapping | ReadMapping;
+export interface DeleteMapping {
+  tool: string;
+  op: "delete";
+  path_param: string;
+}
+
+export type ToolMapping = WriteMapping | ReadMapping | DeleteMapping;
 
 export interface MappingConfig {
   mappings: ToolMapping[];
@@ -55,6 +61,10 @@ function validateMapping(raw: unknown, index: number): ToolMapping {
     return { tool: m.tool, op: "read", path_param: m.path_param };
   }
 
+  if (m.op === "delete") {
+    return { tool: m.tool, op: "delete", path_param: m.path_param };
+  }
+
   if (m.op === "write") {
     if (typeof m.content_param !== "string" || m.content_param.length === 0) {
       throw new Error(`mappings[${index}] ("${m.tool}").content_param must be a non-empty string`);
@@ -80,7 +90,7 @@ function validateMapping(raw: unknown, index: number): ToolMapping {
     return { tool: m.tool, op: "write", path_param: m.path_param, content_param: m.content_param, mode: "full_replace" };
   }
 
-  throw new Error(`mappings[${index}] ("${m.tool}").op must be "read" or "write"`);
+  throw new Error(`mappings[${index}] ("${m.tool}").op must be "read", "write", or "delete"`);
 }
 
 export function loadMappingConfigFile(path: string): MappingConfig {

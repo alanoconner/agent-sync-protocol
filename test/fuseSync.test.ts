@@ -104,7 +104,7 @@ describe("Phase 3: FUSE/WinFsp operation handlers (Section 3.3a)", () => {
     });
   });
 
-  it("unlink clears the file's content", async () => {
+  it("unlink tombstones the file rather than turning it into an empty file", async () => {
     const seed = makeRawClient("to-delete.txt");
     await seed.connect();
     await seed.whenSynced();
@@ -113,7 +113,12 @@ describe("Phase 3: FUSE/WinFsp operation handlers (Section 3.3a)", () => {
 
     await fsOps.unlink("to-delete.txt");
 
-    await vi.waitFor(() => expect(seed.getText().toString()).toBe(""));
+    await vi.waitFor(() => expect(server.getDocState("to-delete.txt")).toEqual({ exists: false, content: "" }));
+    await expect(fsOps.open("to-delete.txt")).rejects.toMatchObject({ code: "ENOENT" });
+
+    const fd = await fsOps.create("to-delete.txt");
+    await fsOps.release(fd);
+    await vi.waitFor(() => expect(server.getDocState("to-delete.txt")).toEqual({ exists: true, content: "" }));
   });
 
   it("rejects a flush whose targeted span was changed by a concurrent edit, leaving live content untouched", async () => {
