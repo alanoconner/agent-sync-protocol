@@ -28,6 +28,7 @@ These commands also work from PowerShell on native Windows. Native Windows requi
 | `asl finish` | Flush, validate, stop, and prepare an uncommitted merge in the original checkout. |
 | `asl clean` | Remove safe managed worktrees and agent branches. |
 | `asl reset` | Stop agents and discard the entire managed session. |
+| `asl recover <path> --use-crdt\|--use-disk` | Resolve restart-time disk/CRDT divergence while the daemon is stopped. |
 | `asl init [--force]` | Write the default `.agent-sync.yml`. |
 | `asl server [options]` | Run a standalone config-driven sync server. |
 | `asl dashboard [options]` | Watch rooms, connected peers, and locks. |
@@ -149,6 +150,15 @@ Destructively returns the current repository to a state where a new ASL session 
 
 Unlike `clean`, reset intentionally discards uncommitted, unmatched, and unflushed changes inside managed worktrees. It also discovers worktrees and branches inside the current session namespace that an interrupted initialization created before it could update `session.json`. If `finish` prepared an uncommitted merge whose `MERGE_HEAD` exactly matches the recorded integration branch, reset aborts it before deleting that branch. It refuses to alter any unrelated merge. Commits and files already accepted on the original project branch are left intact, as are unrelated Git worktrees and branches. Running reset when no session exists succeeds as a no-op.
 
+## `asl recover`
+
+```text
+asl recover path/to/file --use-crdt
+asl recover path/to/file --use-disk
+```
+
+Repository-backed startup compares the last successful flush checkpoint, the durable Yjs state, and the current integration-worktree file. If disk and CRDT both changed from the checkpoint, startup fails rather than overwriting either copy. Run this command with no daemon active: `--use-crdt` materializes the durable room and lets the next startup validate/commit it; `--use-disk` explicitly discards that room's pending CRDT history and establishes disk as its new checkpoint. Long-lived direct SDK clients must reconnect from a fresh document after choosing disk.
+
 ## `asl init`
 
 ```text
@@ -225,7 +235,7 @@ By default, state is stored at:
   session.json
   daemon.json
   daemon.log
-  known-docs.json
+  crdt/                       # versioned, checksummed full Yjs snapshots
   trust.json
   settings/
   worktrees/<session-id>/
@@ -236,7 +246,7 @@ By default, state is stored at:
 
 Set `ASL_STATE_DIR` to move the state root, primarily for tests. The daemon control endpoint requires a random bearer token stored in `session.json`. Both the sync listener and control listener bind to `127.0.0.1`.
 
-Room names are persisted so a restarted daemon can recreate them from the latest committed integration-worktree content. The Yjs document itself is memory-resident between flushes, so a machine or daemon crash before a successful flush can still lose the unflushed in-memory state; inspect retained agent worktrees before continuing after an abnormal termination.
+Every repository-backed mutation is followed by an ordered durability barrier. The daemon reports tool success only after a full Yjs snapshot is fsynced and atomically published, so acknowledged unflushed text, tombstones, validation notices, and causal history survive process restart. Git commits remain separately debounced and validation-gated. The old `known-docs.json` inventory is migrated once into this store and removed.
 
 Session mutations use an owner-recorded repository lock. If an ASL process is interrupted, the next command automatically removes the lock once its recorded PID is no longer alive. Empty locks created by older ASL versions are treated as stale after a short grace period.
 
@@ -248,7 +258,7 @@ Session mutations use an owner-recorded repository lock. If an ASL process is in
 - A process that changes files after its `Bash` tool call has returned is outside the corresponding post-hook snapshot.
 - Specialized agent tools that bypass the covered hooks are not synchronized.
 - Rooms are hydrated once. Direct disk changes made behind a live daemon are not automatically reconciled into an already-open room.
-- Hook infrastructure errors currently warn and fail open so the coding agent is not made unusable. Check agent output and `daemon.log` if synchronization appears absent.
+- Hook infrastructure and durability errors fail the covered tool operation instead of reporting success for an update the server did not acknowledge. Check agent output and `daemon.log` for the underlying storage or connection error.
 
 ## Internal commands
 

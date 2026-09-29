@@ -87,7 +87,7 @@ AGENT_SYNC_VALIDATE_COMMAND="npm test" AGENT_SYNC_REPO_ROOT=/path/to/repo npm ru
 AGENT_SYNC_VALIDATE_ON_FAIL=warn_only ...                         # commit anyway on a failing gate, instead of reverting (reject_merge default)
 ```
 
-With `AGENT_SYNC_REPO_ROOT` (or `--repo-root`), a room is also seeded from the working tree the first time it's created, so an existing file's first sync starts from its real content. With no repo root, the server holds everything in memory only and every room starts empty — good for trying things out, but nothing survives a restart.
+With `AGENT_SYNC_REPO_ROOT` (or `--repo-root`), full Yjs room state is durably snapshotted before a write reports success, independently of the later validation/Git flush. A restart therefore restores acknowledged but unflushed text, tombstones, and validation notices without rebuilding a different CRDT history from disk. Standalone state lives under the repository's Git common directory; managed state lives under `~/.asl`. With no repo root, the server remains memory-only and every room starts empty.
 
 ## `.agent-sync.yml`
 
@@ -137,6 +137,8 @@ asl stop                              # flush, stop the daemon, retain worktrees
 asl finish                            # flush, validate, stop, and prepare an uncommitted merge
 asl clean                             # remove safe worktrees; retain the integration branch
 asl reset                             # stop agents and discard all managed session artifacts
+asl recover <path> --use-crdt         # resolve restart drift in favor of durable CRDT state
+asl recover <path> --use-disk         # explicitly discard that room's pending CRDT state
 asl init                              # write .agent-sync.yml (--force to overwrite)
 asl server                            # start the server from .agent-sync.yml
   --config <path>                     #   config file to read (default ./.agent-sync.yml)
@@ -153,7 +155,7 @@ During development, run any of these straight from source with `npm run cli -- <
 ### What the managed launcher added
 
 - Repository-scoped sessions with one integration worktree and one isolated worktree per agent.
-- A detached loopback-only Yjs daemon with authenticated lifecycle control and known-room recovery.
+- A detached loopback-only Yjs daemon with authenticated lifecycle control and durable, pre-acknowledgment room recovery.
 - Compiled Codex and Claude Code hooks, injected automatically without copying hook files or exporting variables.
 - Lockfile-based dependency setup plus explicit trust for repository-defined setup and validation commands.
 - Safe pause, compacted integration history, uncommitted final merge, and cleanup commands that preserve the integration branch and refuse known data-loss cases.

@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { simpleGit, type SimpleGit } from "simple-git";
-import type { DocHydratedEvent, DocUpdateEvent, SyncServer } from "../server/syncServer.js";
+import type { DocHydratedEvent, DocRecoveredEvent, DocUpdateEvent, SyncServer } from "../server/syncServer.js";
 import { fromLf, type LineEndingStyle } from "../sync/lineEndings.js";
 import type { SyncedFileState } from "../sync/fileState.js";
 import { ValidationGateService } from "../validation/validationGateService.js";
@@ -60,6 +60,7 @@ export class DiskFlushService {
   private readonly lastSeenState = new Map<string, SyncedFileState>();
   private readonly onDocUpdate: (event: DocUpdateEvent) => void;
   private readonly onDocHydrated: (event: DocHydratedEvent) => void;
+  private readonly onDocRecovered: (event: DocRecoveredEvent) => void;
   /**
    * Serializes every flush (auto or manual) through one queue, regardless of
    * which doc it's for. Two docs' debounce timers can legitimately fire
@@ -98,6 +99,14 @@ export class DiskFlushService {
       this.lastFlushedState.set(docName, state);
     };
     this.server.on("docHydrated", this.onDocHydrated);
+
+    this.onDocRecovered = ({ docName, exists, content, flushedState, validationRejected }) => {
+      const state = { exists, content };
+      this.lastSeenState.set(docName, state);
+      this.lastFlushedState.set(docName, { ...flushedState });
+      if (!sameState(state, flushedState) && !validationRejected && this.autoFlush) this.scheduleFlush(docName);
+    };
+    this.server.on("docRecovered", this.onDocRecovered);
   }
 
   private scheduleFlush(docName: string): void {
@@ -166,7 +175,7 @@ export class DiskFlushService {
         if (this.validation.onFail === "reject_merge") {
           // Restore the pre-flush disk state; the live CRDT remains untouched.
           await this.revertDiskWrite(absPath, previousContent);
-          this.server.setValidationRejection(docName, formatRejectionMessage(this.validation.command));
+          await this.server.setValidationRejection(docName, formatRejectionMessage(this.validation.command));
           this.server.emit("validationRejected", [
             { docName, command: this.validation.command, output: result.output },
           ]);
@@ -177,7 +186,7 @@ export class DiskFlushService {
           { docName, command: this.validation.command, output: result.output },
         ]);
       } else {
-        this.server.clearValidationRejection(docName);
+        await this.server.clearValidationRejection(docName);
       }
     }
 
@@ -193,6 +202,7 @@ export class DiskFlushService {
       // service) — that's not a flush failure.
       if (!isNothingToCommitError(err)) throw err;
     }
+    await this.server.markDocFlushed(docName, state);
     this.lastFlushedState.set(docName, state);
   }
 
@@ -231,5 +241,6 @@ export class DiskFlushService {
     this.timers.clear();
     this.server.off("docUpdate", this.onDocUpdate);
     this.server.off("docHydrated", this.onDocHydrated);
+    this.server.off("docRecovered", this.onDocRecovered);
   }
 }

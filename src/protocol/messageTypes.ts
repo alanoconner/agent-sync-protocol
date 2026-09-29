@@ -16,3 +16,5 @@ export const MESSAGE_AWARENESS = 1;
  * request/response, not high-throughput CRDT state.
  */
 export const MESSAGE_LOCK = 2;
+/** Ordered client→server persistence barrier and server→client result. */
+export const MESSAGE_DURABILITY = 3;

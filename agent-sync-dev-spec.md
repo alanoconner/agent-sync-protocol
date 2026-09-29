@@ -19,6 +19,7 @@ A low-level synchronization layer that sits between coding agents and the codeba
 - **CRDT-based merge, not locks, for the default path.** Use an existing, battle-tested library (Yjs or Automerge). Do not hand-roll CRDT algorithms.
 - **Locks are opt-in, lease-based, for declared hot files only** (e.g. shared config, schema files). Always TTL-based expiry, never graceful-unlock-only — an agent process can die mid-edit exactly like a thread can die holding a monitor.
 - **The sync server is the single source of truth for in-flight edits.** Disk is a periodic flushed snapshot, not the live truth — reads should also be transparently redirected (Section 3) so agents never see stale disk content while a merge is in flight elsewhere.
+- **Acknowledged repository-backed edits are durable before publication.** Persist the complete Yjs room state before broadcasting an update or returning tool success; disk/Git flush remains a separate, validation-gated publication checkpoint. Recovery must restore CRDT causal history rather than recreate a new document from disk.
 - **A validation gate runs after every merge, before it reaches the trunk branch/commit.** Textually-correct merges of code can still be semantically broken; this is the backstop for that, not a formality.
 - **Errors from our layer must look like ordinary file-system errors to the agent.** If the underlying tool call would normally throw/return a particular shape on failure, a rejected edit (conflict, lock denial, validation failure) must come back in that same shape — never a custom protocol-specific response the agent was never told to expect. See Section 3.5.
 
@@ -259,6 +260,7 @@ Agent A ── (native file tools, rewired) ──┐        ┌── (native f
 
 ## 6. Disk flush, git integration, validation gate
 
+- Repository-backed servers persist versioned, checksummed Yjs snapshots independently of this flush pipeline. A client-side durability barrier is acknowledged only after all preceding room updates reach that store; memory-only servers retain their explicitly ephemeral behavior.
 - Flush triggers: explicit save event, debounce timer (2–5s inactivity), or manual CLI flush. Debounce length is a direct tradeoff against time-to-feedback: since validation only runs at flush, a longer window lets an agent stack further edits on top of an already-broken intermediate merge before anything catches it (Section 12) — don't tune this purely for commit noise.
 - Normalize line endings explicitly at this layer (LF canonical internally; convert on flush per `.gitattributes`).
 - Git commit boundary: after a successful flush **and** a passing validation gate. Start with commit-per-flush for traceability.
@@ -266,6 +268,7 @@ Agent A ── (native file tools, rewired) ──┐        ┌── (native f
   - On failure with `reject_merge`: revert the flush, surface the failure back through the agent's normal tool-error path (Section 3.5), leave pre-flush state active so agents can retry against current reality.
   - On failure with `warn_only`: commit anyway but flag it — useful only during early development of the system itself, not for production use.
 - Run the full test suite where feasible, not just checks scoped to the changed file — cross-file breakage (Agent A changes a signature, Agent B's file calls the old one) is exactly the failure mode a file-scoped check misses.
+- Persist the last successful flush state as a recovery checkpoint. On restart, recover pending CRDT state when disk still matches that checkpoint, finish an interrupted flush when disk already matches the CRDT, and refuse a true three-way divergence until the user explicitly chooses disk or CRDT state.
 
 ---
 

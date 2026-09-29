@@ -3,6 +3,7 @@ import { DiskFlushService } from "../flush/diskFlushService.js";
 import { createDiskHydrator } from "../flush/diskHydration.js";
 import type { LineEndingStyle } from "../sync/lineEndings.js";
 import { ValidationGateService, type ValidationOnFail } from "../validation/validationGateService.js";
+import { CrdtStore, defaultCrdtPersistenceDir } from "../persistence/crdtStore.js";
 
 export interface StartServerOptions {
   port: number;
@@ -13,6 +14,8 @@ export interface StartServerOptions {
   /** On-disk line-ending style at flush time (`.agent-sync.yml`'s `line_endings`). Defaults to "lf". */
   lineEndings?: LineEndingStyle;
   validation?: { command: string; onFail: ValidationOnFail };
+  /** Overrides the durable CRDT store location. Repo-backed servers enable persistence automatically. */
+  persistenceDir?: string;
   log?: (message: string) => void;
 }
 
@@ -36,15 +39,19 @@ export interface AgentSyncRuntime {
 /** Lifecycle-aware variant used by the managed ASL daemon. */
 export function createAgentSyncRuntime(options: StartServerOptions): AgentSyncRuntime {
   const log = options.log ?? console.log;
+  const persistence = options.repoRoot
+    ? new CrdtStore(options.persistenceDir ?? defaultCrdtPersistenceDir(options.repoRoot))
+    : undefined;
   // With a repo root, a room's first creation seeds it from the working tree
   // (disk→CRDT); without one, rooms start empty, as in every phase before 4.
   const server = new SyncServer(options.port, {
     host: options.host,
     hydrate: options.repoRoot ? createDiskHydrator(options.repoRoot) : undefined,
+    persistence,
   });
-  log(`agent-sync server listening on ws://localhost:${options.port}`);
 
   if (!options.repoRoot) {
+    log(`agent-sync server listening on ws://localhost:${options.port}`);
     return {
       server,
       flushAll: async () => ({ pending: [] }),
@@ -66,7 +73,16 @@ export function createAgentSyncRuntime(options: StartServerOptions): AgentSyncRu
     lineEndings: options.lineEndings,
     validation,
   });
+  try {
+    server.preloadPersistedDocNames();
+  } catch (error) {
+    flush.close();
+    void server.close().catch(() => persistence?.close());
+    throw error;
+  }
+  log(`agent-sync server listening on ws://localhost:${options.port}`);
   log(`agent-sync: hydrating rooms from and flushing to ${options.repoRoot} (debounce ${options.flushDebounceMs ?? 3000}ms, line endings ${options.lineEndings ?? "lf"})`);
+  log(`agent-sync: durable CRDT snapshots at ${persistence!.root}`);
   if (validation) log(`agent-sync: validation gate "${options.validation!.command}" (on_fail: ${options.validation!.onFail})`);
 
   server.on("flushError", ({ docName, error }: { docName: string; error: unknown }) => {
@@ -88,10 +104,10 @@ export function createAgentSyncRuntime(options: StartServerOptions): AgentSyncRu
     close: async ({ flush: shouldFlush = true } = {}) => {
       if (shouldFlush) await flush.flushAll();
       const pending = flush.getPendingDocNames();
-      if (pending.length > 0) return { pending };
+      if (shouldFlush && pending.length > 0) return { pending };
       flush.close();
       await server.close();
-      return { pending: [] };
+      return { pending };
     },
   };
 }

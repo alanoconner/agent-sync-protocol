@@ -179,11 +179,12 @@ export class SyncFileOps {
    * Section 3.6's rejection message is about mutations, so reads never
    * consume it; writes, recreation, and deletion do.
    */
-  private consumePendingRejection(client: SyncClient): void {
+  private async consumePendingRejection(client: SyncClient): Promise<void> {
     const map = client.doc.getMap<string>(VALIDATION_MAP_NAME);
     const message = map.get(VALIDATION_REJECTION_KEY);
     if (message === undefined) return;
     map.delete(VALIDATION_REJECTION_KEY);
+    await client.whenDurable();
     throw new ValidationRejectedError(message);
   }
 
@@ -219,12 +220,13 @@ export class SyncFileOps {
   /** Blind full-buffer write with no record of what the writer last saw — diffed against live content (see textMerge.ts for the tradeoff this implies). */
   async writeFileFull(path: string, content: string): Promise<void> {
     const client = await this.getClient(path);
-    await this.withExclusiveLock(path, client, () => {
-      this.consumePendingRejection(client);
+    await this.withExclusiveLock(path, client, async () => {
+      await this.consumePendingRejection(client);
       client.doc.transact(() => {
         clearObservedTombstones(client.doc);
         applyContentDiff(client.getText(), toLf(content));
       });
+      await client.whenDurable();
     });
   }
 
@@ -241,8 +243,8 @@ export class SyncFileOps {
    */
   async writeFileFromSnapshot(path: string, oldSnapshot: string | null, newContent: string): Promise<void> {
     const client = await this.getClient(path);
-    await this.withExclusiveLock(path, client, () => {
-      this.consumePendingRejection(client);
+    await this.withExclusiveLock(path, client, async () => {
+      await this.consumePendingRejection(client);
       const ytext = client.getText();
       const normalizedNewContent = toLf(newContent);
       const deleted = client.doc.getMap<boolean>(TOMBSTONE_MAP_NAME).size > 0;
@@ -253,6 +255,7 @@ export class SyncFileOps {
           clearObservedTombstones(client.doc);
           applyContentDiff(ytext, normalizedNewContent);
         });
+        await client.whenDurable();
         return;
       }
 
@@ -262,6 +265,7 @@ export class SyncFileOps {
 
       if (ytext.toString() === normalizedOldSnapshot) {
         applyContentDiff(ytext, normalizedNewContent);
+        await client.whenDurable();
         return;
       }
 
@@ -277,16 +281,18 @@ export class SyncFileOps {
       }
 
       applyExactReplace(ytext, path, replacement.oldStr, replacement.newStr);
+      await client.whenDurable();
     });
   }
 
   /** Exact-match-or-reject range replace, per spec 3.2. */
   async writeFileRange(path: string, oldStr: string, newStr: string): Promise<void> {
     const client = await this.getClient(path);
-    await this.withExclusiveLock(path, client, () => {
-      this.consumePendingRejection(client);
+    await this.withExclusiveLock(path, client, async () => {
+      await this.consumePendingRejection(client);
       if (client.doc.getMap<boolean>(TOMBSTONE_MAP_NAME).size > 0) throw new FileNotFoundError(path);
       applyExactReplace(client.getText(), path, toLf(oldStr), toLf(newStr));
+      await client.whenDurable();
     });
   }
 
@@ -305,11 +311,12 @@ export class SyncFileOps {
   }
 
   private async deleteWithClient(path: string, client: SyncClient, expectedContent: string): Promise<void> {
-    await this.withExclusiveLock(path, client, () => {
-      this.consumePendingRejection(client);
+    await this.withExclusiveLock(path, client, async () => {
+      await this.consumePendingRejection(client);
       const state = getSyncedFileState(client.doc);
       if (!state.exists || state.content !== expectedContent) throw new RangeMismatchError(path, "not_found");
       client.doc.getMap<boolean>(TOMBSTONE_MAP_NAME).set(randomUUID(), true);
+      await client.whenDurable();
     });
   }
 

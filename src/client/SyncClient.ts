@@ -5,8 +5,9 @@ import * as awarenessProtocol from "y-protocols/awareness.js";
 import { Observable } from "lib0/observable";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
-import { MESSAGE_AWARENESS, MESSAGE_LOCK, MESSAGE_SYNC } from "../protocol/messageTypes.js";
+import { MESSAGE_AWARENESS, MESSAGE_DURABILITY, MESSAGE_LOCK, MESSAGE_SYNC } from "../protocol/messageTypes.js";
 import type { LockRequestPayload, LockResponsePayload } from "../protocol/lockMessages.js";
+import type { DurabilityRequest, DurabilityResponse } from "../protocol/durabilityMessages.js";
 
 export interface ReconnectOptions {
   /** Delay before the first reconnect attempt. Doubles on each subsequent failure. */
@@ -23,6 +24,8 @@ export interface SyncClientOptions {
   /** Set to false to disable automatic reconnect after an unintended disconnect. Defaults to true. */
   autoReconnect?: boolean;
   reconnect?: ReconnectOptions;
+  /** Maximum time a local mutation may wait for the server's durable barrier. Defaults to 15 seconds. */
+  durabilityTimeoutMs?: number;
 }
 
 export type ConnectionStatus = "connected" | "disconnected" | "reconnecting";
@@ -49,6 +52,14 @@ export class SyncClient extends Observable<string> {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private lockRequestCounter = 0;
   private readonly pendingLockRequests = new Map<string, (response: LockResponsePayload) => void>();
+  private readonly durabilityTimeoutMs: number;
+  private durabilityRequestCounter = 0;
+  private readonly pendingDurability = new Map<number, {
+    resolve: () => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
+  private latestDurability: Promise<void> = Promise.resolve();
 
   constructor(options: SyncClientOptions) {
     super();
@@ -67,6 +78,7 @@ export class SyncClient extends Observable<string> {
       baseDelayMs: options.reconnect?.baseDelayMs ?? 200,
       maxDelayMs: options.reconnect?.maxDelayMs ?? 10_000,
     };
+    this.durabilityTimeoutMs = options.durabilityTimeoutMs ?? 15_000;
 
     this.doc.on("update", (update: Uint8Array, origin: unknown) => {
       if (origin === this) return; // this update came from the server; don't echo it back
@@ -196,6 +208,7 @@ export class SyncClient extends Observable<string> {
       if (!this.synced && syncType === syncProtocol.messageYjsSyncStep2) {
         this.synced = true;
         this.syncedWaiters.splice(0).forEach((resolve) => resolve());
+        this.resendDurabilityBarrier();
       }
     } else if (outerType === MESSAGE_AWARENESS) {
       awarenessProtocol.applyAwarenessUpdate(this.awareness, decoding.readVarUint8Array(decoder), this);
@@ -205,6 +218,15 @@ export class SyncClient extends Observable<string> {
       if (resolve) {
         this.pendingLockRequests.delete(response.requestId);
         resolve(response);
+      }
+    } else if (outerType === MESSAGE_DURABILITY) {
+      const response = JSON.parse(decoding.readVarString(decoder)) as DurabilityResponse;
+      for (const [requestId, pending] of this.pendingDurability) {
+        if (requestId > response.requestId) continue;
+        clearTimeout(pending.timer);
+        this.pendingDurability.delete(requestId);
+        if (response.kind === "durable") pending.resolve();
+        else pending.reject(new Error(response.message));
       }
     }
   }
@@ -241,11 +263,39 @@ export class SyncClient extends Observable<string> {
   }
 
   private sendSyncUpdate(update: Uint8Array): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      const encoder = encoding.createEncoder();
+      encoding.writeVarUint(encoder, MESSAGE_SYNC);
+      syncProtocol.writeUpdate(encoder, update);
+      this.ws.send(encoding.toUint8Array(encoder));
+    }
+    const requestId = ++this.durabilityRequestCounter;
+    const durable = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingDurability.delete(requestId);
+        reject(new Error(`Timed out waiting ${this.durabilityTimeoutMs}ms for the sync server to persist update ${requestId}.`));
+      }, this.durabilityTimeoutMs);
+      this.pendingDurability.set(requestId, { resolve, reject, timer });
+    });
+    // Install a handler immediately so a caller that never invokes
+    // whenDurable() cannot create an unhandled rejection on disconnect.
+    void durable.catch(() => undefined);
+    this.latestDurability = durable;
+    if (this.ws?.readyState === WebSocket.OPEN) this.sendDurabilityBarrier(requestId);
+  }
+
+  private sendDurabilityBarrier(requestId: number): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const request: DurabilityRequest = { kind: "barrier", requestId };
     const encoder = encoding.createEncoder();
-    encoding.writeVarUint(encoder, MESSAGE_SYNC);
-    syncProtocol.writeUpdate(encoder, update);
+    encoding.writeVarUint(encoder, MESSAGE_DURABILITY);
+    encoding.writeVarString(encoder, JSON.stringify(request));
     this.ws.send(encoding.toUint8Array(encoder));
+  }
+
+  private resendDurabilityBarrier(): void {
+    const latest = Math.max(...this.pendingDurability.keys(), 0);
+    if (latest > 0) this.sendDurabilityBarrier(latest);
   }
 
   private sendAwarenessUpdate(update: Uint8Array): void {
@@ -260,6 +310,11 @@ export class SyncClient extends Observable<string> {
   whenSynced(): Promise<void> {
     if (this.synced) return Promise.resolve();
     return new Promise((resolve) => this.syncedWaiters.push(resolve));
+  }
+
+  /** Resolves when the server has durably accepted every local update issued so far. */
+  whenDurable(): Promise<void> {
+    return this.latestDurability;
   }
 
   getText(name = "content"): Y.Text {
@@ -278,6 +333,11 @@ export class SyncClient extends Observable<string> {
       this.reconnectTimer = null;
     }
     this.ws?.close();
+    for (const pending of this.pendingDurability.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("Connection closed before the server acknowledged durable persistence."));
+    }
+    this.pendingDurability.clear();
     this.awareness.destroy();
   }
 }

@@ -187,6 +187,9 @@ export async function runHook(agent: HookAgent, mode: HookMode, raw: string, env
     return agent === "codex" ? await runCodex(mode, input, env) : await runClaude(mode, input, env);
   } catch (error) {
     console.error(`agent-sync ${agent} hook warning: ${error instanceof Error ? error.message : String(error)}`);
-    return 0;
+    // Infrastructure failures are not safe to wave through: the tool may
+    // otherwise report success even though its CRDT update was never durably
+    // accepted. Ordinary scanner warnings are handled inside the workflow.
+    return 2;
   }
 }

@@ -22,18 +22,21 @@ export async function runSessionDaemon(stateDir: string): Promise<void> {
     flushDebounceMs: config.flush.debounceMs,
     lineEndings: config.lineEndings,
     validation: config.validation,
+    persistenceDir: join(stateDir, "crdt"),
   });
   await runtime.server.whenListening();
 
   if (existsSync(knownDocsPath(stateDir))) {
-    try { runtime.server.preloadDocNames(JSON.parse(readFileSync(knownDocsPath(stateDir), "utf8")) as string[]); }
+    try {
+      const legacyNames = JSON.parse(readFileSync(knownDocsPath(stateDir), "utf8")) as string[];
+      runtime.server.preloadDocNames(legacyNames);
+      await Promise.all(legacyNames.map((docName) => runtime.server.whenDocPersisted(docName)));
+      rmSync(knownDocsPath(stateDir), { force: true });
+    }
     catch { /* a corrupt cache must not prevent session recovery */ }
   }
 
   let closing = false;
-  const persistKnownDocs = () => writeJsonAtomic(knownDocsPath(stateDir), runtime.server.getDocNames());
-  const knownDocsTimer = setInterval(persistKnownDocs, 1000);
-  knownDocsTimer.unref();
 
   const control = createServer(async (req, res) => {
     if (req.headers.authorization !== `Bearer ${session.controlToken}`) {
@@ -47,7 +50,6 @@ export async function runSessionDaemon(stateDir: string): Promise<void> {
     if (req.method === "POST" && req.url === "/flush") {
       try {
         const result = await runtime.flushAll();
-        persistKnownDocs();
         json(res, result.pending.length === 0 ? 200 : 409, result);
       } catch (error) { json(res, 500, { error: error instanceof Error ? error.message : String(error) }); }
       return;
@@ -57,13 +59,11 @@ export async function runSessionDaemon(stateDir: string): Promise<void> {
       closing = true;
       try {
         const result = await runtime.close({ flush: true });
-        persistKnownDocs();
         if (result.pending.length > 0) {
           closing = false;
           json(res, 409, result);
           return;
         }
-        clearInterval(knownDocsTimer);
         rmSync(daemonPath(stateDir), { force: true });
         res.once("finish", () => control.close(() => process.exit(0)));
         json(res, 200, result);

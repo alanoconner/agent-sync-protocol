@@ -14,6 +14,7 @@ import { processAlive, shellDisplayQuote } from "./platform.js";
 import { runSessionDaemon } from "./sessionDaemon.js";
 import { cleanSession, createAgentWorktree, ensureDaemon, ensureSession, finishSession, resetSession, stopSession } from "./sessionManager.js";
 import { detectSetupCommand } from "./setupCommand.js";
+import { recoverRoom } from "./recovery.js";
 import {
   discoverRepository,
   readDaemon,
@@ -36,6 +37,7 @@ Commands:
   finish                     Flush, validate, and prepare an uncommitted merge
   clean                      Remove safe managed worktrees; retain integration branch
   reset                      Stop agents and discard all managed session artifacts
+  recover <path>             Resolve durable-state drift with --use-crdt or --use-disk
   init [--force]             Write a default ${CONFIG_FILE_NAME}
   server [options]           Start a standalone sync server
   dashboard [options]        Live "who's editing what" view
@@ -66,6 +68,17 @@ function runInit(args: string[]): void {
   const { written } = writeDefaultConfig(path, args.includes("--force"));
   if (!written) throw new Error(`${CONFIG_FILE_NAME} already exists at ${path} (use --force to overwrite)`);
   console.log(`Wrote ${path}`);
+}
+
+async function runRecover(args: string[]): Promise<void> {
+  const path = args.find((arg) => !arg.startsWith("--"));
+  const choice = args.includes("--use-crdt") ? "crdt" : args.includes("--use-disk") ? "disk" : undefined;
+  if (!path || !choice || (args.includes("--use-crdt") && args.includes("--use-disk"))) {
+    throw new Error("usage: asl recover <path> --use-crdt|--use-disk");
+  }
+  const repo = discoverRepository(process.cwd(), false);
+  const result = await recoverRoom(repositoryStateDir(repo), repo.root, path, choice);
+  console.log(`Resolved ${result.docName} using ${choice === "crdt" ? "durable CRDT state" : "the integration worktree"}. Restart the server to resume synchronization.`);
 }
 
 function portFromServerUrl(serverUrl: string): number {
@@ -258,6 +271,7 @@ async function main(argv: string[]): Promise<void> {
     case "finish": await runFinish(); break;
     case "clean": await runClean(); break;
     case "reset": await runReset(); break;
+    case "recover": await runRecover(rest); break;
     case "init": runInit(rest); break;
     case "server": runServer(rest); break;
     case "dashboard": await runDashboard(rest); break;

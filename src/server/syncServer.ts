@@ -6,9 +6,11 @@ import * as awarenessProtocol from "y-protocols/awareness.js";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
 import { Observable } from "lib0/observable";
-import { MESSAGE_AWARENESS, MESSAGE_LOCK, MESSAGE_SYNC } from "../protocol/messageTypes.js";
+import { MESSAGE_AWARENESS, MESSAGE_DURABILITY, MESSAGE_LOCK, MESSAGE_SYNC } from "../protocol/messageTypes.js";
 import type { LockRequestPayload, LockResponsePayload } from "../protocol/lockMessages.js";
 import { getSyncedFileState, TOMBSTONE_MAP_NAME, type SyncedFileState } from "../sync/fileState.js";
+import type { DurabilityRequest, DurabilityResponse } from "../protocol/durabilityMessages.js";
+import type { CrdtStore } from "../persistence/crdtStore.js";
 
 // Phase 2: one Y.Doc + one Awareness instance per doc name ("room"), all in
 // memory, and no directory semantics beyond "doc name is whatever the
@@ -16,10 +18,9 @@ import { getSyncedFileState, TOMBSTONE_MAP_NAME, type SyncedFileState } from "..
 // that's the client SDK's job (Phase 4's DiskFlushService is the first thing
 // that treats a doc name as a file path, and it does so from outside this
 // class, via getDocNames()/getDocContent() below). Rooms live for the life of
-// the server process (not torn down when the last client leaves) — even with
-// Phase 4's disk flush in place, an in-memory room is still the only copy of
-// whatever hasn't been flushed yet, so dropping one on a momentary
-// all-disconnected state would still be silent data loss.
+// the server process (not torn down when the last client leaves). A
+// repository-backed runtime also snapshots their full Yjs state; memory-only
+// servers still rely on this lifetime rule to avoid dropping live state.
 interface Room {
   doc: Y.Doc;
   awareness: awarenessProtocol.Awareness;
@@ -38,6 +39,26 @@ interface Room {
    * the other half, for the crash-instead-of-hang case.
    */
   lock: { ownerId: string; expiresAt: number; ws: WebSocket } | null;
+  flushedState: SyncedFileState;
+  persistenceQueue: Promise<void>;
+  persistenceError: unknown;
+}
+
+function sameState(a: SyncedFileState, b: SyncedFileState): boolean {
+  return a.exists === b.exists && a.content === b.content;
+}
+
+export class RecoveryConflictError extends Error {
+  constructor(
+    readonly docName: string,
+    readonly persisted: SyncedFileState,
+    readonly flushed: SyncedFileState,
+    readonly disk: SyncedFileState,
+    readonly persistenceRoot: string,
+  ) {
+    super(`Recovery conflict for "${docName}": disk and durable CRDT state both changed since the last successful flush. Run \`asl recover ${JSON.stringify(docName)} --use-crdt\` or \`--use-disk\` while the daemon is stopped.`);
+    this.name = "RecoveryConflictError";
+  }
 }
 
 function toUint8Array(data: RawData): Uint8Array {
@@ -72,6 +93,13 @@ export interface DocHydratedEvent extends SyncedFileState {
   docName: string;
 }
 
+/** Emitted after a room is reconstructed from durable Yjs state. */
+export interface DocRecoveredEvent extends SyncedFileState {
+  docName: string;
+  flushedState: SyncedFileState;
+  validationRejected: boolean;
+}
+
 export interface SyncServerOptions {
   /** Optional bind host. ASL-managed daemons use 127.0.0.1; omitted preserves the historical all-interface behavior. */
   host?: string;
@@ -85,6 +113,8 @@ export interface SyncServerOptions {
    * what treats it as a path under a repo root, from outside this class.
    */
   hydrate?: (docName: string) => SyncedFileState | string | undefined;
+  /** Durable full-document snapshots for repository-backed runtimes. */
+  persistence?: CrdtStore;
 }
 
 export class SyncServer extends Observable<string> {
@@ -93,10 +123,12 @@ export class SyncServer extends Observable<string> {
   private readonly wss: WebSocketServer;
 
   private readonly hydrate: SyncServerOptions["hydrate"];
+  private readonly persistence: CrdtStore | undefined;
 
   constructor(port: number, options: SyncServerOptions = {}) {
     super();
     this.hydrate = options.hydrate;
+    this.persistence = options.persistence;
     // A plain HTTP server (rather than the ws-managed standalone server
     // `new WebSocketServer({ port })` creates internally) so a non-upgrade
     // GET can be answered directly on the same port — Phase 7's "basic
@@ -121,6 +153,29 @@ export class SyncServer extends Observable<string> {
     let room = this.rooms.get(name);
     if (!room) {
       const doc = new Y.Doc();
+      const persisted = this.persistence?.load(name);
+      let initial: SyncedFileState;
+      let recovered = false;
+      if (persisted) {
+        Y.applyUpdate(doc, persisted.update);
+        initial = getSyncedFileState(doc);
+        recovered = true;
+        const hydrated = this.hydrate?.(name);
+        const disk = typeof hydrated === "string" ? { exists: true, content: hydrated } : hydrated;
+        if (disk && !sameState(disk, persisted.flushedState) && !sameState(disk, initial)) {
+          throw new RecoveryConflictError(name, initial, persisted.flushedState, disk, this.persistence!.root);
+        }
+      } else {
+        const hydrated = this.hydrate?.(name);
+        initial = typeof hydrated === "string"
+          ? { exists: true, content: hydrated }
+          : hydrated ?? { exists: true, content: "" };
+        if (initial.exists) {
+          if (initial.content) doc.getText("content").insert(0, initial.content);
+        } else {
+          doc.getMap<boolean>(TOMBSTONE_MAP_NAME).set("hydrated", true);
+        }
+      }
       const awareness = new awarenessProtocol.Awareness(doc);
       // The Awareness constructor gives itself a local state ({}) keyed by
       // doc.clientID, as if the doc itself were a peer. The server isn't a
@@ -128,37 +183,59 @@ export class SyncServer extends Observable<string> {
       // as a fake "who's editing" participant.
       awareness.setLocalState(null);
 
-      room = { doc, awareness, clients: new Map(), lock: null };
+      room = {
+        doc,
+        awareness,
+        clients: new Map(),
+        lock: null,
+        flushedState: persisted?.flushedState ?? initial,
+        persistenceQueue: Promise.resolve(),
+        persistenceError: undefined,
+      };
       this.rooms.set(name, room);
 
-      // Hydrate before the "update" handler below is attached: nobody is
-      // connected to a room that's being created right now, so there's no
-      // one to broadcast to, and a `docUpdate` for content that by
-      // definition is already on disk would only make DiskFlushService
-      // schedule a pointless no-op flush. `docHydrated` primes it instead.
-      const hydrated = this.hydrate?.(name);
-      const initial = typeof hydrated === "string" ? { exists: true, content: hydrated } : hydrated;
-      if (initial) {
-        if (initial.exists) {
-          if (initial.content) doc.getText("content").insert(0, initial.content);
-        } else {
-          doc.getMap<boolean>(TOMBSTONE_MAP_NAME).set("hydrated", true);
+      doc.on("update", (update: Uint8Array, origin: unknown) => {
+        const logicalState = getSyncedFileState(doc);
+        const publish = () => {
+          const encoder = encoding.createEncoder();
+          encoding.writeVarUint(encoder, MESSAGE_SYNC);
+          syncProtocol.writeUpdate(encoder, update);
+          const message = encoding.toUint8Array(encoder);
+          for (const client of room!.clients.keys()) {
+            if (client !== origin && client.readyState === WebSocket.OPEN) client.send(message);
+          }
+          this.emit("docUpdate", [{ docName: name, ...logicalState } satisfies DocUpdateEvent]);
+        };
+        if (!this.persistence) {
+          publish();
+          return;
         }
-        this.emit("docHydrated", [{ docName: name, ...initial } satisfies DocHydratedEvent]);
+        const snapshot = Y.encodeStateAsUpdate(doc);
+        const flushedState = { ...room!.flushedState };
+        const task = room!.persistenceQueue.then(async () => {
+          await this.persistence!.save(name, snapshot, flushedState);
+          publish();
+        });
+        room!.persistenceQueue = task;
+        void task.catch((error) => { room!.persistenceError = error; });
+      });
+
+      if (!persisted && this.persistence) {
+        const snapshot = Y.encodeStateAsUpdate(doc);
+        room.persistenceQueue = this.persistence.save(name, snapshot, room.flushedState).then(() => undefined);
+        void room.persistenceQueue.catch((error) => { room!.persistenceError = error; });
       }
 
-      doc.on("update", (update: Uint8Array, origin: unknown) => {
-        const encoder = encoding.createEncoder();
-        encoding.writeVarUint(encoder, MESSAGE_SYNC);
-        syncProtocol.writeUpdate(encoder, update);
-        const message = encoding.toUint8Array(encoder);
-        for (const client of room!.clients.keys()) {
-          if (client !== origin && client.readyState === WebSocket.OPEN) {
-            client.send(message);
-          }
-        }
-        this.emit("docUpdate", [{ docName: name, ...getSyncedFileState(doc) } satisfies DocUpdateEvent]);
-      });
+      if (recovered) {
+        this.emit("docRecovered", [{
+          docName: name,
+          ...initial,
+          flushedState: { ...room.flushedState },
+          validationRejected: doc.getMap<string>("_validation").has("rejection"),
+        } satisfies DocRecoveredEvent]);
+      } else {
+        this.emit("docHydrated", [{ docName: name, ...initial } satisfies DocHydratedEvent]);
+      }
 
       awareness.on(
         "update",
@@ -197,7 +274,17 @@ export class SyncServer extends Observable<string> {
       ws.close(1008, "Invalid document path encoding");
       return;
     }
-    const room = this.getRoom(docName);
+    let room: Room;
+    try {
+      room = this.getRoom(docName);
+    } catch (error) {
+      ws.close(1011, error instanceof Error ? error.message.slice(0, 120) : "Room recovery failed");
+      return;
+    }
+    if (room.persistenceError) {
+      ws.close(1011, "Durable CRDT storage for this room is unavailable");
+      return;
+    }
     room.clients.set(ws, new Set());
 
     // Greet the new client with our current state vector so it can tell us
@@ -219,6 +306,10 @@ export class SyncServer extends Observable<string> {
     }
 
     ws.on("message", (data: RawData) => {
+      if (room.persistenceError) {
+        ws.close(1011, "Durable CRDT storage for this room is unavailable");
+        return;
+      }
       const decoder = decoding.createDecoder(toUint8Array(data));
       const outerType = decoding.readVarUint(decoder);
 
@@ -240,6 +331,9 @@ export class SyncServer extends Observable<string> {
         encoding.writeVarUint(encoder, MESSAGE_LOCK);
         encoding.writeVarString(encoder, JSON.stringify(response));
         ws.send(encoding.toUint8Array(encoder));
+      } else if (outerType === MESSAGE_DURABILITY) {
+        const request = JSON.parse(decoding.readVarString(decoder)) as DurabilityRequest;
+        void this.handleDurabilityRequest(room, ws, request);
       }
     });
 
@@ -255,6 +349,26 @@ export class SyncServer extends Observable<string> {
       // actually exited) without waiting out the lease.
       if (room.lock?.ws === ws) room.lock = null;
     });
+  }
+
+  private async handleDurabilityRequest(room: Room, ws: WebSocket, request: DurabilityRequest): Promise<void> {
+    let response: DurabilityResponse;
+    try {
+      await room.persistenceQueue;
+      if (room.persistenceError) throw room.persistenceError;
+      response = { kind: "durable", requestId: request.requestId, persistent: this.persistence !== undefined };
+    } catch (error) {
+      response = {
+        kind: "error",
+        requestId: request.requestId,
+        message: `CRDT persistence failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+    if (ws.readyState !== WebSocket.OPEN) return;
+    const encoder = encoding.createEncoder();
+    encoding.writeVarUint(encoder, MESSAGE_DURABILITY);
+    encoding.writeVarString(encoder, JSON.stringify(response));
+    ws.send(encoding.toUint8Array(encoder));
   }
 
   /** Grants, denies, or releases a lock lease for one room. A lease is available if nobody holds it, the current holder's lease expired, or the requester is the current holder (idempotent re-acquire/renew). */
@@ -294,9 +408,41 @@ export class SyncServer extends Observable<string> {
     return state?.exists ? state.content : undefined;
   }
 
-  /** Recreates known rooms after a graceful daemon restart so hooks can pull their current disk-hydrated state. */
+  /** Recreates named rooms, including one-time migration from the legacy known-doc inventory. */
   preloadDocNames(docNames: string[]): void {
     for (const docName of docNames) this.getRoom(docName);
+  }
+
+  /** Reconstructs every durable room before a repository-backed server is exposed to clients. */
+  preloadPersistedDocNames(): void {
+    this.preloadDocNames(this.persistence?.listRoomNames() ?? []);
+  }
+
+  /** Waits until every update currently accepted for a room is on durable storage. */
+  async whenDocPersisted(docName: string): Promise<void> {
+    const room = this.rooms.get(docName);
+    if (!room) return;
+    await room.persistenceQueue;
+    if (room.persistenceError) throw room.persistenceError;
+  }
+
+  /** Records the logical disk/Git checkpoint only after a flush has succeeded. */
+  async markDocFlushed(docName: string, state: SyncedFileState): Promise<void> {
+    const room = this.rooms.get(docName);
+    if (!room) return;
+    const previous = room.flushedState;
+    room.flushedState = { ...state };
+    if (!this.persistence) return;
+    const snapshot = Y.encodeStateAsUpdate(room.doc);
+    const checkpoint = { ...state };
+    const task = room.persistenceQueue.then(() => this.persistence!.save(docName, snapshot, checkpoint)).then(() => undefined);
+    room.persistenceQueue = task;
+    void task.catch((error) => { room.persistenceError = error; });
+    try { await task; }
+    catch (error) {
+      room.flushedState = previous;
+      throw error;
+    }
   }
 
   /**
@@ -309,13 +455,15 @@ export class SyncServer extends Observable<string> {
    * surfacing it as an `EVALIDATE` error on that write per Section 3.5/3.6.
    * No-op if the room no longer exists (e.g. server shut down mid-flush).
    */
-  setValidationRejection(docName: string, message: string): void {
+  async setValidationRejection(docName: string, message: string): Promise<void> {
     this.rooms.get(docName)?.doc.getMap<string>("_validation").set("rejection", message);
+    await this.whenDocPersisted(docName);
   }
 
   /** Clears a pending validation-rejection notice, e.g. once a later flush of the same doc passes. No-op if none is pending. */
-  clearValidationRejection(docName: string): void {
+  async clearValidationRejection(docName: string): Promise<void> {
     this.rooms.get(docName)?.doc.getMap<string>("_validation").delete("rejection");
+    await this.whenDocPersisted(docName);
   }
 
   /** Current lock lease for a doc (Phase 6), or `null` if unlocked/expired/no such room. Read-only — acquiring/releasing goes through the `MESSAGE_LOCK` protocol, not this getter. Mainly for tests/observability. */
@@ -356,17 +504,22 @@ export class SyncServer extends Observable<string> {
     });
   }
 
-  close(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      for (const room of this.rooms.values()) {
-        for (const client of room.clients.keys()) client.terminate();
-        room.awareness.destroy();
-      }
-      // `wss` doesn't own `httpServer` (it was handed one), so closing it
-      // only stops handling new upgrades — the actual listening socket is
-      // `httpServer`'s to close.
+  async close(): Promise<void> {
+    for (const room of this.rooms.values()) {
+      for (const client of room.clients.keys()) client.terminate();
+    }
+    let persistenceError: unknown;
+    try { await Promise.all([...this.rooms.values()].map((room) => room.persistenceQueue)); }
+    catch (error) { persistenceError = error; }
+    try {
+      for (const room of this.rooms.values()) room.awareness.destroy();
       this.wss.close();
-      this.httpServer.close((err) => (err ? reject(err) : resolve()));
-    });
+      await new Promise<void>((resolve, reject) => {
+        this.httpServer.close((err) => (err ? reject(err) : resolve()));
+      });
+    } finally {
+      this.persistence?.close();
+    }
+    if (persistenceError) throw persistenceError;
   }
 }
