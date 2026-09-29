@@ -17,6 +17,12 @@ export interface HookCommands {
   gitBash: string;
 }
 
+declare const ASL_SEA: boolean | undefined;
+
+function runningAsSea(): boolean {
+  return typeof ASL_SEA !== "undefined" && ASL_SEA;
+}
+
 function quotePosix(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
@@ -58,10 +64,12 @@ function defaultCliEntry(): string {
   return resolve(dirname(modulePath), `index.${modulePath.endsWith(".ts") ? "ts" : "js"}`);
 }
 
-export function selfInvocation(entry = defaultCliEntry()): CommandInvocation {
-  if (!entry.endsWith(".ts")) return { command: process.execPath, args: [entry] };
+export function selfInvocation(entry?: string, sea = runningAsSea()): CommandInvocation {
+  if (sea) return { command: process.execPath, args: [] };
+  const resolvedEntry = entry ?? defaultCliEntry();
+  if (!resolvedEntry.endsWith(".ts")) return { command: process.execPath, args: [resolvedEntry] };
   const require = createRequire(import.meta.url);
-  return { command: process.execPath, args: [require.resolve("tsx/cli"), entry] };
+  return { command: process.execPath, args: [require.resolve("tsx/cli"), resolvedEntry] };
 }
 
 export function hookCommands(kind: "codex" | "claude", mode: "pre" | "post"): HookCommands {

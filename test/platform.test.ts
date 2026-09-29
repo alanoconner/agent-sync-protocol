@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderCommand, shellDisplayQuote } from "../src/cli/platform.js";
+import { renderCommand, selfInvocation, shellDisplayQuote } from "../src/cli/platform.js";
 
 describe("cross-platform command rendering", () => {
   const invocation = {
@@ -22,5 +22,19 @@ describe("cross-platform command rendering", () => {
   it("keeps apostrophes safe in POSIX commands and uses Windows display quoting", () => {
     expect(renderCommand({ command: "/tmp/agent's node", args: [] }, "posix")).toBe("'/tmp/agent'\"'\"'s node'");
     expect(shellDisplayQuote("C:\\My Repo", "win32")).toBe('"C:\\My Repo"');
+  });
+
+  it("reinvokes installed JavaScript through Node", () => {
+    expect(selfInvocation("/opt/agent-sync/dist/cli/index.js", false)).toEqual({
+      command: process.execPath,
+      args: ["/opt/agent-sync/dist/cli/index.js"],
+    });
+  });
+
+  it("reinvokes a single executable without a filesystem entry point", () => {
+    expect(selfInvocation("/path/that/must/not/be-used.js", true)).toEqual({
+      command: process.execPath,
+      args: [],
+    });
   });
 });

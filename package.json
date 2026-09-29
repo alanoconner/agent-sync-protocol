@@ -1,15 +1,57 @@
 {
-  "name": "agent-sync-protocol",
+  "name": "agent-sync-layer",
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "import": "./dist/config.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp.d.ts",
+      "import": "./dist/mcp.js"
+    },
+    "./fuse": {
+      "types": "./dist/fuse.d.ts",
+      "import": "./dist/fuse.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "docs/asl-cli.md",
+    "docs/private-packaging.md",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=20.12"
+  },
   "bin": {
     "agent-sync": "dist/cli/index.js",
     "asl": "dist/cli/index.js"
   },
   "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc -p .",
+    "typecheck": "tsc --noEmit -p .",
+    "typecheck:examples": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --strict --esModuleInterop --skipLibCheck examples/claudeCodeHook.ts examples/codexHook.ts",
     "test": "vitest run",
+    "build:binary": "node scripts/build-sea.mjs",
+    "pack:private": "node scripts/pack-private.mjs",
+    "smoke:binary": "node scripts/smoke-binary.mjs",
+    "verify:package": "node scripts/verify-package.mjs",
+    "prepack": "npm run clean && npm run build",
     "server": "tsx src/server/index.ts",
     "cli": "tsx src/cli/index.ts",
     "demo": "tsx examples/demoClient.ts"
@@ -35,6 +77,8 @@
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.10.2",
     "@types/ws": "^8.5.13",
+    "esbuild": "^0.28.2",
+    "postject": "^1.0.0-alpha.6",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

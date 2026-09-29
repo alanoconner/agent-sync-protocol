@@ -4,20 +4,24 @@ A CRDT-based synchronization layer that lets multiple coding agents edit the sam
 
 ## Requirements
 
-- Node.js 20+ and npm
+- Node.js 20.12+ and npm for source development or the private npm package; private standalone builds embed Node.js
 - `git` on `PATH` (Git for Windows on native Windows; required by the managed `asl codex` / `asl claude` workflow and by disk flush)
 - Codex CLI or Claude Code on `PATH`, depending on which agent you launch
 - macFUSE (macOS) / libfuse (Linux) — only if you explicitly install and use the optional FUSE adapter; it is not used by the hook workflow and has no native WinFsp implementation
 
 ## Install
 
+`agent-sync-layer` is currently a private package and is not published to npm. Repository collaborators can build and install a verified tarball locally:
+
 ```bash
-npm install
-npm run build
-npm link        # exposes both `asl` and `agent-sync` while developing this repo
+npm ci
+npm run pack:private
+npm install -g ./artifacts/npm/agent-sync-layer-0.1.0.tgz
 ```
 
-The same commands work in PowerShell on Windows. `fuse-native` is optional, so a missing native FUSE runtime does not prevent installation or hook-based use.
+The packaging scripts can produce standalone archives for Linux x64, Windows x64, macOS x64, and macOS ARM64 when run on each target. Those builds expose `asl` without requiring Node.js on the destination machine. See [private packaging and installation](docs/private-packaging.md) for local builds, checksum verification, signing limitations, and the temporarily deferred CI workflow.
+
+For development in this checkout, `npm run build && npm link` exposes both `asl` and `agent-sync`. `fuse-native` is optional, so a missing native FUSE runtime does not prevent installation or hook-based use; FUSE is not included in standalone builds.
 
 ## Quick start — real coding agents
 
@@ -33,7 +37,7 @@ Run the command again in another terminal to add another agent to the same sessi
 
 ### Native Windows
 
-The managed hook workflow supports launching `asl` from PowerShell, cmd, or Git Bash. Install Node.js 20+, Git for Windows, and the chosen agent CLI, then use the same `npm install` / `npm run build` / `npm link` sequence above. Codex receives a native `command_windows` hook command automatically. Claude Code uses Git Bash internally; ASL discovers the standard Git for Windows installation or honors `CLAUDE_CODE_GIT_BASH_PATH` when Git is installed elsewhere.
+The managed hook workflow supports launching `asl` from PowerShell, cmd, or Git Bash. Install Git for Windows and the chosen agent CLI, then install either the private npm tarball (which also needs Node.js 20.12+) or the Windows x64 standalone artifact. Codex receives a native `command_windows` hook command automatically. Claude Code uses Git Bash internally; ASL discovers the standard Git for Windows installation or honors `CLAUDE_CODE_GIT_BASH_PATH` when Git is installed elsewhere.
 
 WSL remains supported as a Linux environment, but is not required for the native hook workflow. The experimental FUSE adapter is unrelated to this support and does not implement WinFsp.
 
@@ -227,4 +231,4 @@ See CLAUDE.md's Tests section for what each `test/*.test.ts` file covers.
 
 ## Project status
 
-Phases 1–7 of the spec's build order are implemented and tested. Phase 8 (symbol index) has not started. Phase 9 now has the managed `asl codex` / `asl claude` launcher, native Windows hook support, npm-bin groundwork, and macOS/Linux/Windows CI; standalone binaries, package publication, and platform installers remain outstanding. See [CHANGELOG.md](CHANGELOG.md) for a phase-by-phase history and [agent-sync-dev-spec.md](agent-sync-dev-spec.md) Section 10 for the full phase list.
+Phases 1–7 of the spec's build order are implemented and tested. Phase 8 (symbol index) has not started. Phase 9 now has the managed launcher, native Windows hook support, a private installable npm/SDK tarball, and native standalone builds for Linux x64, Windows x64, macOS x64, and macOS ARM64. The GitHub Actions workflow is temporarily deferred because the repository token cannot update workflow files. Public package publication, permanent releases, trusted code signing, and platform package-manager manifests are intentionally deferred. See [CHANGELOG.md](CHANGELOG.md) for a phase-by-phase history and [agent-sync-dev-spec.md](agent-sync-dev-spec.md) Section 10 for the full phase list.

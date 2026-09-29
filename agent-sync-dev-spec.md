@@ -355,6 +355,8 @@ The managed Phase 9 launcher also exposes explicit lifecycle commands: `stop` pa
 
 **Phase 9 — Cross-platform packaging.** Single binary per OS (Node SEA or `pkg`), npm-published client SDK, install docs.
 
+Current private staging covers an installable SDK tarball and native SEA artifacts for Linux x64, Windows x64, macOS x64, and macOS ARM64. The installation CI matrix is designed but its GitHub Actions workflow is temporarily not checked in because the repository token cannot update workflow files. Public npm/GitHub publication and trusted signing are deliberately deferred; `package.json` remains private until that release decision is made.
+
 Do not start Phase 6 or Phase 8 until Phases 1–3 are proven against a real (not simulated) multi-agent scenario — both the CRDT merge behavior on actual code and the transparent tool-swap are the highest-risk unknowns and should be validated early.
 
 ---
