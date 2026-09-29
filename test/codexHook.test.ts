@@ -1,12 +1,13 @@
 import { execFile, execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createDiskHydrator } from "../src/flush/diskHydration.js";
 import { SyncServer } from "../src/server/syncServer.js";
 
-const TSX = join(process.cwd(), "node_modules", ".bin", "tsx");
+const TSX_CLI = createRequire(import.meta.url).resolve("tsx/cli");
 const CLI = join(process.cwd(), "src", "cli", "index.ts");
 const ORIGINAL = "const A = 1;\nconst HEADER = 34;\nconst B = 2;\n";
 
@@ -21,8 +22,8 @@ function runHook(
 ) {
   return new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
     const child = execFile(
-      TSX,
-      [CLI, "_hook", "codex", mode],
+      process.execPath,
+      [TSX_CLI, CLI, "_hook", "codex", mode],
       { cwd: workspace, env: { ...process.env, AGENT_SYNC_SERVER: serverUrl } },
       (error, stdout, stderr) =>
         resolve({ code: error ? ((error as { code?: number }).code ?? 1) : 0, stdout, stderr }),
@@ -121,6 +122,19 @@ describe("Codex hook bridge", () => {
     expect((await runHook("post", a, url, "a1", "sa")).code).toBe(0);
     expect(server.getDocNames()).toEqual(["src/made.js"]);
     expect(server.getDocContent("src/made.js")).toBe("made();\n");
+  }, 60_000);
+
+  it("materializes shared LF content with the configured CRLF disk style", async () => {
+    writeFileSync(join(a, ".agent-sync.yml"), "line_endings: crlf\n");
+    server.preloadDocNames(["src/app.js"]);
+
+    expect((await runHook("pre", a, url, "crlf-1", "sa")).code).toBe(0);
+    expect(readFileSync(join(a, "src", "app.js"), "utf8")).toBe(ORIGINAL.replace(/\n/g, "\r\n"));
+
+    writeFileSync(join(a, "src", "app.js"), ORIGINAL.replace("HEADER = 34", "HEADER = 55").replace(/\n/g, "\r\n"));
+    expect((await runHook("post", a, url, "crlf-1", "sa")).code).toBe(0);
+    expect(server.getDocContent("src/app.js")).toContain("HEADER = 55");
+    expect(server.getDocContent("src/app.js")).not.toContain("\r");
   }, 60_000);
 
   it("blocks apply_patch deletion before it can diverge from shared state", async () => {

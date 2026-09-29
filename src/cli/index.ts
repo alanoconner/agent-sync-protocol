@@ -10,6 +10,7 @@ import { startAgentSyncServer } from "../server/bootstrap.js";
 import type { ServerStatus } from "../server/syncServer.js";
 import { launchAgent } from "./agentLauncher.js";
 import { formatStatus, statusUrlFor } from "./dashboardView.js";
+import { processAlive, shellDisplayQuote } from "./platform.js";
 import { runSessionDaemon } from "./sessionDaemon.js";
 import { cleanSession, createAgentWorktree, ensureDaemon, ensureSession, finishSession, resetSession, stopSession } from "./sessionManager.js";
 import { detectSetupCommand } from "./setupCommand.js";
@@ -182,8 +183,6 @@ async function runAgent(kind: AgentKind, args: string[]): Promise<void> {
   process.exitCode = await launchAgent(stateDir, created.agent, daemon, { executable: options.executable, args: options.forwarded });
 }
 
-function processAlive(pid: number): boolean { try { process.kill(pid, 0); return true; } catch { return false; } }
-
 function runStatus(args: string[]): void {
   const repo = discoverRepository(process.cwd(), false);
   const stateDir = repositoryStateDir(repo);
@@ -202,8 +201,6 @@ function runStatus(args: string[]): void {
   console.log(`  daemon: ${daemon && processAlive(daemon.pid) ? daemon.serverUrl : "stopped"}`);
   for (const agent of value.agents) console.log(`  ${agent.id}: ${agent.kind} ${agent.running ? "running" : agent.status} — ${agent.worktree}`);
 }
-
-function quote(value: string): string { return `'${value.replace(/'/g, `'"'"'`)}'`; }
 
 async function runStop(): Promise<void> {
   const repo = discoverRepository(process.cwd(), false);
@@ -225,10 +222,10 @@ async function runFinish(): Promise<void> {
   }
   console.log(`ASL session ${session.sessionId} finished. Integration changes are staged on ${session.baseBranch}; no commit was created.`);
   console.log("Review or complete the pending merge:");
-  console.log(`  git -C ${quote(session.repoRoot)} status`);
-  console.log(`  git -C ${quote(session.repoRoot)} diff --cached`);
-  console.log(`  git -C ${quote(session.repoRoot)} commit`);
-  console.log(`  git -C ${quote(session.repoRoot)} merge --abort`);
+  console.log(`  git -C ${shellDisplayQuote(session.repoRoot)} status`);
+  console.log(`  git -C ${shellDisplayQuote(session.repoRoot)} diff --cached`);
+  console.log(`  git -C ${shellDisplayQuote(session.repoRoot)} commit`);
+  console.log(`  git -C ${shellDisplayQuote(session.repoRoot)} merge --abort`);
 }
 
 async function runClean(): Promise<void> {

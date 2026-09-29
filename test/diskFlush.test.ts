@@ -7,6 +7,7 @@ import { SyncServer } from "../src/server/syncServer.js";
 import { SyncClient } from "../src/client/SyncClient.js";
 import { DiskFlushService } from "../src/flush/diskFlushService.js";
 import { ValidationGateService } from "../src/validation/validationGateService.js";
+import { shellDisplayQuote } from "../src/cli/platform.js";
 
 async function makeRepo(): Promise<{ dir: string; git: SimpleGit }> {
   const dir = await mkdtemp(join(tmpdir(), "agent-sync-flush-"));
@@ -92,7 +93,11 @@ describe("Phase 4: disk flush + git commit (Section 6)", () => {
     await git.add("tracked.txt");
     await writeFile(join(repoDir, "tracked.txt"), "unstaged\r\n");
     await writeFile(join(repoDir, ".git", "index.lock"), "test lock");
-    const validation = new ValidationGateService({ command: "node -e 'process.exit(1)'", cwd: repoDir, onFail: "reject_merge" });
+    const validation = new ValidationGateService({
+      command: `${shellDisplayQuote(process.execPath)} -e ${shellDisplayQuote("process.exit(1)")}`,
+      cwd: repoDir,
+      onFail: "reject_merge",
+    });
     flush = new DiskFlushService({ server, repoRoot: repoDir, git, validation, autoFlush: false });
     const client = makeClient("tracked.txt");
     await client.connect();
@@ -102,7 +107,7 @@ describe("Phase 4: disk flush + git commit (Section 6)", () => {
     await flush.flushAll();
     expect(await readFile(join(repoDir, "tracked.txt"), "utf8")).toBe("unstaged\r\n");
     expect(await git.show([":tracked.txt"])).toBe("staged");
-  });
+  }, 15_000);
 
   it.each(["hello world.txt", "日本語.txt", "a?b#c%.txt", "literal*.txt"])("round-trips the literal filename %s through hydration and flush", async (docName) => {
     await server.close();

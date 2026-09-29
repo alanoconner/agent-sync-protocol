@@ -35,7 +35,12 @@ function toErrno(err: unknown, Fuse: { EAGAIN: number; EBUSY: number; EIO: numbe
  * `SyncFsOperations` by test/fuseSync.test.ts without needing a real mount.
  */
 export async function mountSyncFs(options: MountOptions): Promise<() => Promise<void>> {
-  const { default: Fuse } = await import("fuse-native");
+  let Fuse: typeof import("fuse-native").default;
+  try {
+    ({ default: Fuse } = await import("fuse-native"));
+  } catch (error) {
+    throw new Error("FUSE support requires the optional fuse-native package and a configured macFUSE/libfuse runtime", { cause: error });
+  }
   const ops = new SyncFsOperations(
     resolveSyncFileOpsOptions(options.config, {
       syncServerUrl: options.serverUrl,

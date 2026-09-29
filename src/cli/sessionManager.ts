@@ -1,10 +1,11 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { CONFIG_FILE_NAME, loadAgentSyncConfigOrDefault, type AgentSyncConfig } from "../config/agentSyncConfig.js";
 import { ValidationGateService } from "../validation/validationGateService.js";
 import { detectSetupCommand } from "./setupCommand.js";
+import { processAlive, selfInvocation, spawnPortable, terminateProcess } from "./platform.js";
 import {
   acquireStateLock,
   daemonPath,
@@ -128,41 +129,6 @@ export function createAgentWorktree(
   } finally { release(); }
 }
 
-function processAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
-}
-
-async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (!processAlive(pid)) return true;
-    await delay(50);
-  }
-  return !processAlive(pid);
-}
-
-async function terminateManagedProcess(pid: number, label: string): Promise<boolean> {
-  if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) {
-    throw new Error(`refusing to stop ${label}: invalid recorded process id ${pid}`);
-  }
-  if (!processAlive(pid)) return false;
-  try { process.kill(pid, "SIGTERM"); }
-  catch (error) {
-    if (!processAlive(pid)) return false;
-    throw error;
-  }
-  if (await waitForProcessExit(pid, 3_000)) return true;
-  process.kill(pid, "SIGKILL");
-  if (!await waitForProcessExit(pid, 2_000)) throw new Error(`could not stop ${label} (pid ${pid})`);
-  return true;
-}
-
-function selfCommand(): { command: string; prefix: string[] } {
-  const entry = resolve(process.argv[1]);
-  if (entry.endsWith(".ts")) return { command: resolve(dirname(entry), "../../node_modules/.bin/tsx"), prefix: [entry] };
-  return { command: process.execPath, prefix: [entry] };
-}
-
 async function healthyDaemon(stateDir: string, session: SessionManifest): Promise<DaemonState | undefined> {
   const daemon = readDaemon(stateDir);
   if (!daemon || !processAlive(daemon.pid)) return undefined;
@@ -179,11 +145,12 @@ export async function ensureDaemon(stateDir: string, session: SessionManifest): 
   rmSync(daemonPath(stateDir), { force: true });
   const logPath = join(stateDir, "daemon.log");
   const log = openSync(logPath, "a", 0o600);
-  const self = selfCommand();
-  const child = spawn(self.command, [...self.prefix, "_daemon", "--state", stateDir], {
+  const self = selfInvocation();
+  const child = spawnPortable(self.command, [...self.args, "_daemon", "--state", stateDir], {
     detached: true,
     stdio: ["ignore", log, log],
     env: process.env,
+    windowsHide: true,
   });
   child.unref();
   closeSync(log);
@@ -459,7 +426,7 @@ function removeManagedWorktree(repoRoot: string, worktree: string, branch: strin
 
 function pathInside(root: string, candidate: string): boolean {
   const rel = relative(canonicalPath(root), canonicalPath(candidate));
-  return rel !== "" && rel !== ".." && !rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) && !isAbsolute(rel);
+  return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
 
 function assertResetScope(stateDir: string, session: SessionManifest): string {
@@ -521,15 +488,24 @@ export async function resetSession(stateDir: string): Promise<ResetResult> {
 
   let agentsStopped = 0;
   for (const agent of session.agents) {
-    let stopped = agent.pid ? await terminateManagedProcess(agent.pid, `agent ${agent.id}`) : false;
+    let stopped = agent.pid ? await terminateProcess(agent.pid, `agent ${agent.id}`) : false;
     if (!stopped && agent.launcherPid) {
-      stopped = await terminateManagedProcess(agent.launcherPid, `agent launcher ${agent.id}`);
+      stopped = await terminateProcess(agent.launcherPid, `agent launcher ${agent.id}`);
     }
     if (stopped) agentsStopped += 1;
   }
 
   const daemon = readDaemon(stateDir);
-  const daemonStopped = daemon ? await terminateManagedProcess(daemon.pid, "ASL daemon") : false;
+  let daemonStopped = false;
+  if (daemon) {
+    if (await healthyDaemon(stateDir, session)) {
+      try {
+        await controlRequest(stateDir, session, "shutdown");
+        daemonStopped = true;
+      } catch { /* reset is explicitly destructive, so force-stop below */ }
+    }
+    if (processAlive(daemon.pid)) daemonStopped = await terminateProcess(daemon.pid, "ASL daemon") || daemonStopped;
+  }
   const mergeAborted = abortPreparedAslMerge(session);
 
   for (const agent of session.agents) {

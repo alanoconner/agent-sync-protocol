@@ -31,7 +31,8 @@ describe("hook workspace root", () => {
 
   it("prefers CLAUDE_PROJECT_DIR over the cwd walk", () => {
     const root = tempRoot();
-    expect(findWorkspaceRoot(root, { CLAUDE_PROJECT_DIR: "/some/project" })).toBe("/some/project");
+    const configured = tempRoot();
+    expect(findWorkspaceRoot(root, { CLAUDE_PROJECT_DIR: configured })).toBe(configured);
   });
 
   it("falls back to cwd when no marker exists", () => {

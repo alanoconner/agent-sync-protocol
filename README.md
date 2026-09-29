@@ -5,9 +5,9 @@ A CRDT-based synchronization layer that lets multiple coding agents edit the sam
 ## Requirements
 
 - Node.js 20+ and npm
-- `git` on `PATH` (required by the managed `asl codex` / `asl claude` workflow and by disk flush)
+- `git` on `PATH` (Git for Windows on native Windows; required by the managed `asl codex` / `asl claude` workflow and by disk flush)
 - Codex CLI or Claude Code on `PATH`, depending on which agent you launch
-- macFUSE (macOS) / libfuse (Linux) / WinFsp (Windows) — only if you use the FUSE mount (Section 3.3a); not needed for the server, CLI, MCP proxy, or the Claude Code hook bridge
+- macFUSE (macOS) / libfuse (Linux) — only if you explicitly install and use the optional FUSE adapter; it is not used by the hook workflow and has no native WinFsp implementation
 
 ## Install
 
@@ -16,6 +16,8 @@ npm install
 npm run build
 npm link        # exposes both `asl` and `agent-sync` while developing this repo
 ```
+
+The same commands work in PowerShell on Windows. `fuse-native` is optional, so a missing native FUSE runtime does not prevent installation or hook-based use.
 
 ## Quick start — real coding agents
 
@@ -28,6 +30,12 @@ asl claude
 ```
 
 Run the command again in another terminal to add another agent to the same session. ASL automatically creates one integration worktree and a separate worktree/branch per agent, starts a loopback-only Yjs daemon, injects the compiled pre/post hooks, sets the required environment, detects the package-manager install command, and launches the requested CLI in its worktree. The original checkout and branch are not modified.
+
+### Native Windows
+
+The managed hook workflow supports launching `asl` from PowerShell, cmd, or Git Bash. Install Node.js 20+, Git for Windows, and the chosen agent CLI, then use the same `npm install` / `npm run build` / `npm link` sequence above. Codex receives a native `command_windows` hook command automatically. Claude Code uses Git Bash internally; ASL discovers the standard Git for Windows installation or honors `CLAUDE_CODE_GIT_BASH_PATH` when Git is installed elsewhere.
+
+WSL remains supported as a Linux environment, but is not required for the native hook workflow. The experimental FUSE adapter is unrelated to this support and does not implement WinFsp.
 
 On first use, ASL shows any repository-defined setup or validation command before running it. Codex also asks you to trust the stable hook definition: open `/hooks` when prompted by ASL. This trust step is intentionally left to Codex.
 
@@ -159,7 +167,7 @@ Three interception mechanisms exist today, per spec Section 3 — pick based on 
 | Exposes file ops as MCP tools | Generic MCP proxy | `src/mcp/` — see `examples/agent-sync-mcp-map.example.yml` |
 | Claude Code CLI | Managed hook bridge | `asl claude` (`src/hooks/`) |
 | Codex CLI/app | Managed hook bridge | `asl codex` (`src/hooks/`) |
-| CLI agent with no hook API and no rebindable registry | FUSE/WinFsp mount | `src/fuse/` (single-file merge only — no `readdir`/`mkdir`/`rename` yet, needs macFUSE installed) |
+| CLI agent with no hook API and no rebindable registry | Optional FUSE mount | `src/fuse/` (macOS/Linux prototype only; no `readdir`/`mkdir`/`rename`, no WinFsp adapter) |
 
 ### Manual Claude Code hook setup (advanced)
 
@@ -217,4 +225,4 @@ See CLAUDE.md's Tests section for what each `test/*.test.ts` file covers.
 
 ## Project status
 
-Phases 1–7 of the spec's build order are implemented and tested. Phase 8 (symbol index) has not started. Phase 9 now has the managed `asl codex` / `asl claude` launcher and npm-bin groundwork, while standalone binaries, package publication, platform installers, and installation CI remain outstanding. See [CHANGELOG.md](CHANGELOG.md) for a phase-by-phase history and [agent-sync-dev-spec.md](agent-sync-dev-spec.md) Section 10 for the full phase list.
+Phases 1–7 of the spec's build order are implemented and tested. Phase 8 (symbol index) has not started. Phase 9 now has the managed `asl codex` / `asl claude` launcher, native Windows hook support, npm-bin groundwork, and macOS/Linux/Windows CI; standalone binaries, package publication, and platform installers remain outstanding. See [CHANGELOG.md](CHANGELOG.md) for a phase-by-phase history and [agent-sync-dev-spec.md](agent-sync-dev-spec.md) Section 10 for the full phase list.

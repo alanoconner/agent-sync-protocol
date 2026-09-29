@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { simpleGit, type SimpleGit } from "simple-git";
 import { SyncServer } from "../src/server/syncServer.js";
@@ -48,7 +48,7 @@ describe("createDiskHydrator (disk→CRDT seeding, in isolation)", () => {
     const outside = join(repoDir, "..", `agent-sync-outside-${Date.now()}.txt`);
     await writeFile(outside, "secret", "utf8");
     try {
-      expect(createDiskHydrator(repoDir)(`../${outside.split("/").pop()}`)).toBeUndefined();
+      expect(createDiskHydrator(repoDir)(`../${basename(outside)}`)).toBeUndefined();
       expect(createDiskHydrator(repoDir)(outside)).toBeUndefined(); // absolute path resolves outside too
       expect(createDiskHydrator(repoDir)("")).toBeUndefined(); // the root itself
     } finally {

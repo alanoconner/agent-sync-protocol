@@ -2,20 +2,21 @@ import { execFile } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createDiskHydrator } from "../src/flush/diskHydration.js";
 import { SyncServer } from "../src/server/syncServer.js";
 
-const TSX = join(process.cwd(), "node_modules", ".bin", "tsx");
+const TSX_CLI = createRequire(import.meta.url).resolve("tsx/cli");
 const CLI = join(process.cwd(), "src", "cli", "index.ts");
 const ORIGINAL = "const A = 1;\nconst HEADER = 34;\nconst B = 2;\n";
 
 function runHook(mode: "pre" | "post", workspace: string, serverUrl: string, toolUseId: string, session: string, cwd = workspace) {
   return new Promise<{ code: number; stderr: string }>((resolve) => {
     const child = execFile(
-      TSX,
-      [CLI, "_hook", "claude", mode],
+      process.execPath,
+      [TSX_CLI, CLI, "_hook", "claude", mode],
       { cwd, env: { ...process.env, AGENT_SYNC_SERVER: serverUrl, CLAUDE_PROJECT_DIR: "" } },
       (err, _stdout, stderr) => resolve({ code: err ? ((err as { code?: number }).code ?? 1) : 0, stderr }),
     );

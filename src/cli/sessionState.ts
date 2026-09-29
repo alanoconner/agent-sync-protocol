@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { processAlive } from "./platform.js";
 
 export type AgentKind = "codex" | "claude";
 export type SessionStatus = "active" | "paused" | "finished";
@@ -126,11 +127,6 @@ interface StateLockOwner {
   pid: number;
   token: string;
   acquiredAt: string;
-}
-
-function processAlive(pid: number): boolean {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
 function readLockOwner(lock: string): StateLockOwner | undefined {

@@ -16,8 +16,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "cross-spawn": "^7.0.6",
     "diff": "^9.0.0",
-    "fuse-native": "^2.2.6",
     "js-yaml": "^5.4.1",
     "lib0": "^0.2.94",
     "simple-git": "^3.36.0",
@@ -26,7 +26,11 @@
     "yjs": "^13.6.20",
     "zod": "^4.5.4"
   },
+  "optionalDependencies": {
+    "fuse-native": "^2.2.6"
+  },
   "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
     "@types/diff": "^7.0.2",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.10.2",

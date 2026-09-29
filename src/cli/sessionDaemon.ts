@@ -90,7 +90,9 @@ export async function runSessionDaemon(stateDir: string): Promise<void> {
   };
   writeJsonAtomic(daemonPath(stateDir), daemon);
 
-  process.on("SIGTERM", () => {
+  const requestShutdown = () => {
     fetch(`${daemon.controlUrl}/shutdown`, { method: "POST", headers: { Authorization: `Bearer ${session.controlToken}` } }).catch(() => undefined);
-  });
+  };
+  process.on("SIGTERM", requestShutdown);
+  process.on("SIGINT", requestShutdown);
 }

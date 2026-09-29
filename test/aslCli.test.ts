@@ -1,15 +1,16 @@
 import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-const TSX = join(process.cwd(), "node_modules", ".bin", "tsx");
+const TSX_CLI = createRequire(import.meta.url).resolve("tsx/cli");
 const CLI = join(process.cwd(), "src", "cli", "index.ts");
 const roots: string[] = [];
 
 function command(cwd: string, stateRoot: string, args: string[], input?: string, extraEnv: NodeJS.ProcessEnv = {}): string {
-  return execFileSync(TSX, [CLI, ...args], {
+  return execFileSync(process.execPath, [TSX_CLI, CLI, ...args], {
     cwd,
     encoding: "utf8",
     input,
@@ -29,6 +30,21 @@ function fixture(): { repo: string; state: string } {
   execFileSync("git", ["-C", repo, "add", "README.md"]);
   execFileSync("git", ["-C", repo, "commit", "-qm", "fixture"]);
   return { repo, state };
+}
+
+function fakeAgent(repo: string, name: string, body: string): string {
+  const script = join(repo, `${name}.cjs`);
+  const executable = join(repo, process.platform === "win32" ? `${name}.cmd` : `${name}.sh`);
+  writeFileSync(script, body);
+  if (process.platform === "win32") {
+    writeFileSync(executable, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`);
+  } else {
+    writeFileSync(executable, `#!/bin/sh\nexec '${process.execPath}' '${script}' "$@"\n`);
+    chmodSync(executable, 0o755);
+  }
+  execFileSync("git", ["-C", repo, "add", script, executable]);
+  execFileSync("git", ["-C", repo, "commit", "-qm", `add ${name}`]);
+  return executable;
 }
 
 afterEach(() => {
@@ -56,12 +72,8 @@ describe("ASL CLI managed lifecycle", () => {
 
   it("stops a running agent and resets its live session from the public CLI", async () => {
     const { repo, state } = fixture();
-    const fakeAgent = join(repo, "fake-agent.sh");
-    writeFileSync(fakeAgent, "#!/bin/sh\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n");
-    chmodSync(fakeAgent, 0o755);
-    execFileSync("git", ["-C", repo, "add", "fake-agent.sh"]);
-    execFileSync("git", ["-C", repo, "commit", "-qm", "fake agent"]);
-    const launcher = spawn(TSX, [CLI, "codex", "--yes", "--skip-setup", "--bin", fakeAgent], {
+    const executable = fakeAgent(repo, "fake-agent", "process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000);\n");
+    const launcher = spawn(process.execPath, [TSX_CLI, CLI, "codex", "--yes", "--skip-setup", "--bin", executable], {
       cwd: repo,
       env: { ...process.env, ASL_STATE_DIR: state },
       stdio: ["ignore", "pipe", "pipe"],
@@ -100,7 +112,8 @@ describe("ASL CLI managed lifecycle", () => {
 
   it("launches Codex, syncs an edit through Yjs, finishes, and cleans safely", () => {
     const { repo, state } = fixture();
-    const launch = command(repo, state, ["codex", "--yes", "--skip-setup", "--bin", "/usr/bin/true"]);
+    const executable = fakeAgent(repo, "noop-agent", "process.exit(0);\n");
+    const launch = command(repo, state, ["codex", "--yes", "--skip-setup", "--bin", executable]);
     expect(launch).toContain("codex workspace");
     expect(launch).toContain("integration branch");
 

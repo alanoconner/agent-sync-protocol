@@ -1,34 +1,25 @@
-import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { writeJsonAtomic, type AgentKind, type AgentRecord, type DaemonState } from "./sessionState.js";
 import { updateAgent } from "./sessionManager.js";
+import { findGitBash, hookCommands, spawnPortable, terminateProcess } from "./platform.js";
 
 export interface AgentLaunchOptions {
   executable?: string;
   args?: string[];
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
-
-function cliCommand(): string {
-  const entry = resolve(process.argv[1]);
-  if (entry.endsWith(".ts")) return `${shellQuote(resolve(dirname(entry), "../../node_modules/.bin/tsx"))} ${shellQuote(entry)}`;
-  return `${shellQuote(process.execPath)} ${shellQuote(entry)}`;
-}
-
 export function hookCommand(kind: AgentKind, mode: "pre" | "post"): string {
-  return `${cliCommand()} _hook ${kind} ${mode}`;
+  const commands = hookCommands(kind, mode);
+  return process.platform === "win32" ? commands.gitBash : commands.posix;
 }
 
 export function codexHookOverrides(): string[] {
-  const pre = JSON.stringify(hookCommand("codex", "pre"));
-  const post = JSON.stringify(hookCommand("codex", "post"));
+  const pre = hookCommands("codex", "pre");
+  const post = hookCommands("codex", "post");
   return [
-    `hooks.PreToolUse=[{matcher="^(apply_patch|Bash)$",hooks=[{type="command",command=${pre},statusMessage="Refreshing shared workspace state"}]}]`,
-    `hooks.PostToolUse=[{matcher="^(apply_patch|Bash)$",hooks=[{type="command",command=${post},statusMessage="Publishing workspace changes"}]}]`,
+    `hooks.PreToolUse=[{matcher="^(apply_patch|Bash)$",hooks=[{type="command",command=${JSON.stringify(pre.posix)},command_windows=${JSON.stringify(pre.windows)},statusMessage="Refreshing shared workspace state"}]}]`,
+    `hooks.PostToolUse=[{matcher="^(apply_patch|Bash)$",hooks=[{type="command",command=${JSON.stringify(post.posix)},command_windows=${JSON.stringify(post.windows)},statusMessage="Publishing workspace changes"}]}]`,
   ];
 }
 
@@ -76,34 +67,40 @@ export async function launchAgent(
   const args = agent.kind === "codex"
     ? ["-C", agent.worktree, ...codexHookOverrides().flatMap((value) => ["-c", value]), ...forwarded]
     : ["--settings", claudeSettings(stateDir, agent), ...forwarded];
-  const child = spawn(executable, args, {
+  const gitBash = agent.kind === "claude" && process.platform === "win32" ? findGitBash() : undefined;
+  if (agent.kind === "claude" && process.platform === "win32" && !gitBash) {
+    updateAgent(stateDir, agent.id, { status: "exited", exitCode: 127, launcherPid: undefined, pid: undefined });
+    throw new Error("native Windows Claude Code requires Git for Windows; install it or set CLAUDE_CODE_GIT_BASH_PATH to bash.exe");
+  }
+  const child = spawnPortable(executable, args, {
     cwd: agent.worktree,
     stdio: "inherit",
     env: {
       ...process.env,
+      ...(gitBash ? { CLAUDE_CODE_GIT_BASH_PATH: gitBash } : {}),
       AGENT_SYNC_SERVER: daemon.serverUrl,
       ASL_SESSION_ID: agent.id,
     },
   });
-  let forcedTermination: NodeJS.Timeout | undefined;
+  let terminating = false;
   const terminateChild = () => {
-    try { child.kill("SIGTERM"); } catch { /* child may have exited between signal delivery and forwarding */ }
-    forcedTermination = setTimeout(() => {
-      try { child.kill("SIGKILL"); } catch { /* child already exited */ }
-    }, 2_000);
+    if (terminating || !child.pid) return;
+    terminating = true;
+    void terminateProcess(child.pid, `${agent.kind} agent`).catch(() => undefined);
   };
   process.once("SIGTERM", terminateChild);
+  process.once("SIGINT", terminateChild);
   return await new Promise<number>((resolvePromise, reject) => {
     child.once("spawn", () => updateAgent(stateDir, agent.id, { pid: child.pid, status: "running" }));
     child.once("error", (error) => {
       process.off("SIGTERM", terminateChild);
-      if (forcedTermination) clearTimeout(forcedTermination);
+      process.off("SIGINT", terminateChild);
       updateAgent(stateDir, agent.id, { status: "exited", exitCode: 127, launcherPid: undefined, pid: undefined });
       reject(new Error(`failed to start ${executable}: ${error.message}`));
     });
     child.once("exit", (code, signal) => {
       process.off("SIGTERM", terminateChild);
-      if (forcedTermination) clearTimeout(forcedTermination);
+      process.off("SIGINT", terminateChild);
       const exitCode = code ?? (signal ? 1 : 0);
       updateAgent(stateDir, agent.id, { status: "exited", exitCode, launcherPid: undefined, pid: undefined });
       resolvePromise(exitCode);

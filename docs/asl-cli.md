@@ -15,6 +15,8 @@ npm link
 
 This exposes both `asl` and `agent-sync`. Published packages, standalone binaries, and platform installers are not implemented yet.
 
+These commands also work from PowerShell on native Windows. Native Windows requires Git for Windows. ASL can be invoked from PowerShell, cmd, or Git Bash; Claude Code itself uses Git Bash for hook commands, while Codex receives its native Windows hook command through `command_windows`. Set `CLAUDE_CODE_GIT_BASH_PATH` only for a nonstandard/portable Git installation that ASL cannot discover.
+
 ## Command index
 
 | Command | Purpose |
@@ -143,7 +145,7 @@ Cleanup is allowed only after `stop` or `finish`. For each agent worktree, ASL c
 asl reset
 ```
 
-Destructively returns the current repository to a state where a new ASL session can be started. It sends `SIGTERM` to every running agent PID recorded in the session (then `SIGKILL` if a process does not exit), stops the daemon the same way, force-removes all recorded agent and integration worktrees, deletes their ASL-owned branches, prunes Git's worktree metadata, and removes all repository-scoped ASL state, including the setup/validation trust record.
+Destructively returns the current repository to a state where a new ASL session can be started. It terminates every recorded agent process tree, asks a responsive daemon to shut down through its authenticated control endpoint, force-stops anything that remains, removes all recorded agent and integration worktrees, deletes their ASL-owned branches, prunes Git's worktree metadata, and removes all repository-scoped ASL state, including the setup/validation trust record. Unix uses `SIGTERM` then `SIGKILL`; Windows uses `taskkill /T /F` for the forced fallback.
 
 Unlike `clean`, reset intentionally discards uncommitted, unmatched, and unflushed changes inside managed worktrees. It also discovers worktrees and branches inside the current session namespace that an interrupted initialization created before it could update `session.json`. If `finish` prepared an uncommitted merge whose `MERGE_HEAD` exactly matches the recorded integration branch, reset aborts it before deleting that branch. It refuses to alter any unrelated merge. Commits and files already accepted on the original project branch are left intact, as are unrelated Git worktrees and branches. Running reset when no session exists succeeds as a no-op.
 
@@ -219,7 +221,7 @@ The configured `server` address is used by standalone consumers. A managed sessi
 By default, state is stored at:
 
 ```text
-~/.asl/repos/<repository-hash>/
+~/.asl/repos/<repository-hash>/        # %USERPROFILE%\.asl on Windows
   session.json
   daemon.json
   daemon.log
