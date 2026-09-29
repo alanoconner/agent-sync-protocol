@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
@@ -122,12 +122,70 @@ export function newSession(repo: RepositoryInfo, stateDir: string): SessionManif
   };
 }
 
+interface StateLockOwner {
+  pid: number;
+  token: string;
+  acquiredAt: string;
+}
+
+function processAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+function readLockOwner(lock: string): StateLockOwner | undefined {
+  try {
+    const value = JSON.parse(readFileSync(join(lock, "owner.json"), "utf8")) as Partial<StateLockOwner>;
+    if (typeof value.pid !== "number" || typeof value.token !== "string" || typeof value.acquiredAt !== "string") return undefined;
+    return value as StateLockOwner;
+  } catch { return undefined; }
+}
+
+function staleLock(lock: string): boolean {
+  const owner = readLockOwner(lock);
+  if (owner) return !processAlive(owner.pid);
+  // Versions before owner metadata used an empty directory. A short grace
+  // period avoids stealing one in the mkdir-to-owner-write window.
+  try { return Date.now() - statSync(lock).mtimeMs >= 2_000; }
+  catch { return true; }
+}
+
 export function acquireStateLock(stateDir: string): () => void {
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const lock = join(stateDir, ".lock");
-  try { mkdirSync(lock); }
-  catch { throw new Error("another ASL command is already changing this repository session"); }
-  return () => rmSync(lock, { recursive: true, force: true });
+  const owner: StateLockOwner = {
+    pid: process.pid,
+    token: randomBytes(16).toString("hex"),
+    acquiredAt: new Date().toISOString(),
+  };
+  for (;;) {
+    try {
+      mkdirSync(lock);
+      try { writeJsonAtomic(join(lock, "owner.json"), owner); }
+      catch (error) {
+        rmSync(lock, { recursive: true, force: true });
+        throw error;
+      }
+      break;
+    } catch (error) {
+      if (!existsSync(lock) || !staleLock(lock)) {
+        throw new Error("another ASL command is already changing this repository session", { cause: error });
+      }
+      const stale = `${lock}.stale-${process.pid}-${randomBytes(4).toString("hex")}`;
+      try { renameSync(lock, stale); }
+      catch {
+        if (!existsSync(lock)) continue;
+        throw new Error("another ASL command is already changing this repository session");
+      }
+      rmSync(stale, { recursive: true, force: true });
+    }
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (readLockOwner(lock)?.token === owner.token) rmSync(lock, { recursive: true, force: true });
+  };
 }
 
 export function gitCommand(repoRoot: string, args: string[], stdio: "pipe" | "inherit" = "pipe"): string {

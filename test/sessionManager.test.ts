@@ -1,7 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   cleanSession,
@@ -11,7 +11,7 @@ import {
   prepareUncommittedMerge,
   resetSession,
 } from "../src/cli/sessionManager.js";
-import { discoverRepository, readSession, repositoryStateDir, writeSession } from "../src/cli/sessionState.js";
+import { acquireStateLock, discoverRepository, readSession, repositoryStateDir, writeSession } from "../src/cli/sessionState.js";
 
 const roots: string[] = [];
 function git(cwd: string, args: string[]): string {
@@ -176,6 +176,48 @@ describe("ASL managed Git sessions", () => {
     expect(git(fixture.repo, ["branch", "--list", session.integrationBranch])).toBe("");
     expect(readSession(stateDir)).toBeUndefined();
     expect(readFileSync(join(fixture.repo, "app.txt"), "utf8")).toBe("base\n");
+  });
+
+  it("recovers a legacy stale lock left by an interrupted command", async () => {
+    const fixture = repoFixture();
+    const repo = discoverRepository(fixture.repo);
+    const stateDir = repositoryStateDir(repo, { ASL_STATE_DIR: fixture.stateRoot });
+    ensureSession(repo, stateDir, true);
+    const lock = join(stateDir, ".lock");
+    mkdirSync(lock);
+    const staleTime = new Date(Date.now() - 10_000);
+    utimesSync(lock, staleTime, staleTime);
+
+    await expect(resetSession(stateDir)).resolves.toEqual(expect.objectContaining({ hadSession: true }));
+    expect(existsSync(stateDir)).toBe(false);
+  });
+
+  it("does not steal a state lock whose recorded owner is still alive", async () => {
+    const fixture = repoFixture();
+    const repo = discoverRepository(fixture.repo);
+    const stateDir = repositoryStateDir(repo, { ASL_STATE_DIR: fixture.stateRoot });
+    ensureSession(repo, stateDir, true);
+    const release = acquireStateLock(stateDir);
+    try {
+      await expect(resetSession(stateDir)).rejects.toThrow(/another ASL command/);
+    } finally { release(); }
+  });
+
+  it("removes an unrecorded worktree left by interrupted agent initialization", async () => {
+    const fixture = repoFixture();
+    const repo = discoverRepository(fixture.repo);
+    const stateDir = repositoryStateDir(repo, { ASL_STATE_DIR: fixture.stateRoot });
+    const session = ensureSession(repo, stateDir, true);
+    const orphanBranch = `asl/${session.sessionId}/codex-orphan`;
+    const orphanWorktree = join(dirname(session.integrationWorktree), "codex-orphan");
+    git(fixture.repo, ["worktree", "add", "-b", orphanBranch, orphanWorktree, session.baseCommit]);
+    writeFileSync(join(orphanWorktree, "unmatched.txt"), "discard me\n");
+    expect(readSession(stateDir)?.agents).toEqual([]);
+
+    await resetSession(stateDir);
+
+    expect(existsSync(orphanWorktree)).toBe(false);
+    expect(git(fixture.repo, ["branch", "--list", orphanBranch])).toBe("");
   });
 
   it("terminates a recorded running agent before removing its worktree", async () => {

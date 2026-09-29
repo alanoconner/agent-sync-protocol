@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { CONFIG_FILE_NAME, loadAgentSyncConfigOrDefault, type AgentSyncConfig } from "../config/agentSyncConfig.js";
 import { ValidationGateService } from "../validation/validationGateService.js";
@@ -422,21 +422,76 @@ function abortPreparedAslMerge(session: SessionManifest): boolean {
   return true;
 }
 
-function registeredWorktrees(repoRoot: string): Set<string> {
-  const paths = new Set<string>();
-  for (const line of gitCommand(repoRoot, ["worktree", "list", "--porcelain"]).split("\n")) {
-    if (line.startsWith("worktree ")) paths.add(resolve(line.slice("worktree ".length)));
+interface RegisteredWorktree {
+  path: string;
+  branch?: string;
+}
+
+function canonicalPath(path: string): string {
+  try { return realpathSync(path); } catch { return resolve(path); }
+}
+
+function registeredWorktrees(repoRoot: string): RegisteredWorktree[] {
+  const records: RegisteredWorktree[] = [];
+  let current: RegisteredWorktree | undefined;
+  for (const line of `${gitCommand(repoRoot, ["worktree", "list", "--porcelain"])}\n`.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      if (current) records.push(current);
+      current = { path: canonicalPath(line.slice("worktree ".length)) };
+    } else if (current && line.startsWith("branch refs/heads/")) {
+      current.branch = line.slice("branch refs/heads/".length);
+    } else if (!line && current) {
+      records.push(current);
+      current = undefined;
+    }
   }
-  return paths;
+  return records;
 }
 
 function removeManagedWorktree(repoRoot: string, worktree: string, branch: string): void {
-  if (existsSync(worktree) || registeredWorktrees(repoRoot).has(resolve(worktree))) {
+  if (existsSync(worktree) || registeredWorktrees(repoRoot).some((record) => record.path === canonicalPath(worktree))) {
     gitCommand(repoRoot, ["worktree", "remove", "--force", worktree], "inherit");
   }
   if (gitSucceeds(repoRoot, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])) {
     gitCommand(repoRoot, ["branch", "-D", branch], "inherit");
   }
+}
+
+function pathInside(root: string, candidate: string): boolean {
+  const rel = relative(canonicalPath(root), canonicalPath(candidate));
+  return rel !== "" && rel !== ".." && !rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) && !isAbsolute(rel);
+}
+
+function assertResetScope(stateDir: string, session: SessionManifest): string {
+  const worktreeRoot = resolve(stateDir, "worktrees", session.sessionId);
+  if (!pathInside(worktreeRoot, session.integrationWorktree)) {
+    throw new Error("refusing to reset: integration worktree is outside this session's managed state directory");
+  }
+  for (const agent of session.agents) {
+    if (!pathInside(worktreeRoot, agent.worktree)) {
+      throw new Error(`refusing to reset: ${agent.id} worktree is outside this session's managed state directory`);
+    }
+  }
+  return worktreeRoot;
+}
+
+function removeOrphanedSessionWorktrees(session: SessionManifest, worktreeRoot: string): void {
+  const branchPrefix = `asl/${session.sessionId}/`;
+  const recordedPaths = new Set([
+    canonicalPath(session.integrationWorktree),
+    ...session.agents.map((agent) => canonicalPath(agent.worktree)),
+  ]);
+  for (const record of registeredWorktrees(session.repoRoot)) {
+    if (recordedPaths.has(record.path)) continue;
+    if (!pathInside(worktreeRoot, record.path) || !record.branch?.startsWith(branchPrefix)) continue;
+    removeManagedWorktree(session.repoRoot, record.path, record.branch);
+  }
+  const branches = gitCommand(session.repoRoot, [
+    "for-each-ref",
+    "--format=%(refname:short)",
+    `refs/heads/${branchPrefix}`,
+  ]).split("\n").filter((branch) => branch.startsWith(branchPrefix));
+  for (const branch of branches) gitCommand(session.repoRoot, ["branch", "-D", branch], "inherit");
 }
 
 /**
@@ -447,9 +502,11 @@ function removeManagedWorktree(repoRoot: string, worktree: string, branch: strin
 export async function resetSession(stateDir: string): Promise<ResetResult> {
   const release = acquireStateLock(stateDir);
   let session: SessionManifest | undefined;
+  let worktreeRoot: string | undefined;
   try {
     session = readSession(stateDir);
     if (session) {
+      worktreeRoot = assertResetScope(stateDir, session);
       // Block a concurrent launcher from adding another worktree while reset is
       // stopping processes and removing the recorded session artifacts.
       session.status = "finished";
@@ -479,6 +536,7 @@ export async function resetSession(stateDir: string): Promise<ResetResult> {
     removeManagedWorktree(session.repoRoot, agent.worktree, agent.branch);
   }
   removeManagedWorktree(session.repoRoot, session.integrationWorktree, session.integrationBranch);
+  removeOrphanedSessionWorktrees(session, worktreeRoot!);
   gitCommand(session.repoRoot, ["worktree", "prune"]);
   rmSync(stateDir, { recursive: true, force: true });
   return { hadSession: true, sessionId: session.sessionId, agentsStopped, daemonStopped, mergeAborted };

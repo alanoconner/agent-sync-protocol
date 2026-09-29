@@ -145,7 +145,7 @@ asl reset
 
 Destructively returns the current repository to a state where a new ASL session can be started. It sends `SIGTERM` to every running agent PID recorded in the session (then `SIGKILL` if a process does not exit), stops the daemon the same way, force-removes all recorded agent and integration worktrees, deletes their ASL-owned branches, prunes Git's worktree metadata, and removes all repository-scoped ASL state, including the setup/validation trust record.
 
-Unlike `clean`, reset intentionally discards uncommitted, unmatched, and unflushed changes inside managed worktrees. If `finish` prepared an uncommitted merge whose `MERGE_HEAD` exactly matches the recorded integration branch, reset aborts it before deleting that branch. It refuses to alter any unrelated merge. Commits and files already accepted on the original project branch are left intact, as are unrelated Git worktrees and branches. Running reset when no session exists succeeds as a no-op.
+Unlike `clean`, reset intentionally discards uncommitted, unmatched, and unflushed changes inside managed worktrees. It also discovers worktrees and branches inside the current session namespace that an interrupted initialization created before it could update `session.json`. If `finish` prepared an uncommitted merge whose `MERGE_HEAD` exactly matches the recorded integration branch, reset aborts it before deleting that branch. It refuses to alter any unrelated merge. Commits and files already accepted on the original project branch are left intact, as are unrelated Git worktrees and branches. Running reset when no session exists succeeds as a no-op.
 
 ## `asl init`
 
@@ -235,6 +235,8 @@ By default, state is stored at:
 Set `ASL_STATE_DIR` to move the state root, primarily for tests. The daemon control endpoint requires a random bearer token stored in `session.json`. Both the sync listener and control listener bind to `127.0.0.1`.
 
 Room names are persisted so a restarted daemon can recreate them from the latest committed integration-worktree content. The Yjs document itself is memory-resident between flushes, so a machine or daemon crash before a successful flush can still lose the unflushed in-memory state; inspect retained agent worktrees before continuing after an abnormal termination.
+
+Session mutations use an owner-recorded repository lock. If an ASL process is interrupted, the next command automatically removes the lock once its recorded PID is no longer alive. Empty locks created by older ASL versions are treated as stale after a short grace period.
 
 ## Safety checks and limitations
 
