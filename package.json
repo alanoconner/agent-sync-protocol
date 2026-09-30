@@ -1,7 +1,28 @@
 {
   "name": "agent-sync-layer",
   "version": "0.1.0",
+  "description": "CRDT synchronization and Git worktree orchestration for concurrent AI coding agents, including Codex and Claude Code.",
   "private": true,
+  "homepage": "https://github.com/alanoconner/agent-sync-protocol#readme",
+  "bugs": {
+    "url": "https://github.com/alanoconner/agent-sync-protocol/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alanoconner/agent-sync-protocol.git"
+  },
+  "keywords": [
+    "ai-agents",
+    "coding-agents",
+    "codex",
+    "claude-code",
+    "crdt",
+    "yjs",
+    "git-worktree",
+    "mcp",
+    "collaborative-editing",
+    "multi-agent"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -30,9 +51,12 @@
   "files": [
     "dist/",
     "docs/asl-cli.md",
-    "docs/private-packaging.md",
+    "docs/installation.md",
+    "docs/getting-started.md",
+    "docs/distribution.md",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=20.12"
@@ -48,7 +72,7 @@
     "typecheck:examples": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --strict --esModuleInterop --skipLibCheck examples/claudeCodeHook.ts examples/codexHook.ts",
     "test": "vitest run",
     "build:binary": "node scripts/build-sea.mjs",
-    "pack:private": "node scripts/pack-private.mjs",
+    "pack:package": "node scripts/pack-package.mjs",
     "smoke:binary": "node scripts/smoke-binary.mjs",
     "verify:package": "node scripts/verify-package.mjs",
     "prepack": "npm run clean && npm run build",

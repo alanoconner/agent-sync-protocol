@@ -1,0 +1,76 @@
+name: Bug report
+description: Report reproducible incorrect behavior in Agent Sync Layer
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for the report. Do not include credentials, proprietary source code, or security-vulnerability details. Use the process in SECURITY.md for suspected vulnerabilities.
+  - type: input
+    id: version
+    attributes:
+      label: ASL version
+      description: Include the npm version, GitHub Release tag, or commit SHA.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation method
+      options:
+        - npm package
+        - standalone executable
+        - source checkout
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, architecture, Node.js version when applicable, and Git version.
+      placeholder: macOS 15 arm64, Node.js 22.x, Git 2.x
+    validations:
+      required: true
+  - type: input
+    id: agent
+    attributes:
+      label: Coding agent
+      description: Codex, Claude Code, SDK/MCP/FUSE integration, and its version.
+      placeholder: Codex CLI
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include commands, relevant configuration, and the smallest sequence that demonstrates the problem.
+      placeholder: |
+        1. Run `asl ...`
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and logs
+      description: Redact secrets and sensitive repository contents.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I reproduced this with the latest published version or current default branch.
+          required: true
+        - label: This report does not disclose a security vulnerability.
+          required: true

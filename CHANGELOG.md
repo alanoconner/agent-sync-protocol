@@ -19,7 +19,7 @@ Tracks progress against the build order in [agent-sync-dev-spec.md](agent-sync-d
 - The daemon's authenticated control API and synchronization listener are bound to `127.0.0.1`.
 - Added unit coverage for setup detection, hook injection/argument ownership, worktree lifecycle, final merge guards, and cleanup safety, plus an end-to-end CLI test proving an agent worktree edit passes through the hook and Yjs, is committed on the integration branch, and reaches the original checkout as a staged, uncommitted merge.
 - Added `docs/asl-cli.md` as the complete public command and operations reference, including lifecycle semantics, option forwarding, configuration, state layout, safety checks, limitations, and internal-command boundaries.
-- Private packaging and installation scripts are complete. The GitHub Actions workflow was removed temporarily after GitHub rejected an HTTPS-token push that lacked `workflow` scope; the intended private matrix and restoration requirements are documented in `docs/private-packaging.md`. Public npm publication, permanent GitHub Releases, public licensing, trusted code signing, and platform package-manager manifests are intentionally deferred until the repository owner chooses to publish.
+- Packaging and installation scripts were completed initially for private distribution. The current maintainer workflow is documented in `docs/distribution.md`.
 
 ## Phase 3 addendum — Codex hook adapter
 

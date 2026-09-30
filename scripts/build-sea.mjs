@@ -72,7 +72,7 @@ try {
   if (!smoke.stdout.includes("Usage: asl")) throw new Error("SEA smoke test did not print the ASL usage text");
   copyFileSync(join(root, "README.md"), join(targetDir, "README.md"));
   copyFileSync(join(root, "CHANGELOG.md"), join(targetDir, "CHANGELOG.md"));
-  copyFileSync(join(root, "docs", "private-packaging.md"), join(targetDir, "INSTALL.md"));
+  copyFileSync(join(root, "docs", "installation.md"), join(targetDir, "INSTALL.md"));
   console.log(executable);
 } finally {
   rmSync(temporary, { recursive: true, force: true });

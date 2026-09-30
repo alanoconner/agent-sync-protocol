@@ -4,20 +4,17 @@
 
 `agent-sync` is an alias for `asl`. There are no global flags. Run `asl` with no arguments to print the built-in command summary.
 
-## Private installation
+## Installation
 
-The package is named `agent-sync-layer` and remains private. From a checkout, build a tarball and install it globally:
+Install the published npm package with Node.js 20.12 or newer:
 
 ```bash
-cd /path/to/agent-sync-protocol
-npm ci
-npm run pack:private
-npm install -g ./artifacts/npm/agent-sync-layer-0.1.0.tgz
+npm install --global agent-sync-layer
 ```
 
-This exposes both `asl` and `agent-sync` and requires Node.js 20.12 or newer. The packaging scripts can also produce standalone Linux x64, Windows x64, macOS x64, and macOS ARM64 artifacts that embed Node.js. See [private packaging and installation](private-packaging.md) for checksums, local standalone builds, and the temporarily deferred CI workflow. No package is published to npm and no permanent GitHub Release is created.
+This exposes both `asl` and `agent-sync`. Standalone Linux x64, Windows x64, macOS x64, and macOS ARM64 archives embed Node.js and are available from [GitHub Releases](https://github.com/alanoconner/agent-sync-protocol/releases/latest). See [Installation](installation.md) for checksums, platform instructions, upgrades, and source installation.
 
-For source development, `npm run build && npm link` remains available. Native Windows requires Git for Windows. ASL can be invoked from PowerShell, cmd, or Git Bash; Claude Code itself uses Git Bash for hook commands, while Codex receives its native Windows hook command through `command_windows`. Set `CLAUDE_CODE_GIT_BASH_PATH` only for a nonstandard/portable Git installation that ASL cannot discover.
+Native Windows requires Git for Windows. ASL can be invoked from PowerShell, cmd, or Git Bash; Claude Code itself uses Git Bash for hook commands, while Codex receives its native Windows hook command through `command_windows`. Set `CLAUDE_CODE_GIT_BASH_PATH` only for a nonstandard or portable Git installation that ASL cannot discover.
 
 ## Command index
 

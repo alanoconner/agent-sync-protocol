@@ -1,107 +1,147 @@
-# agent-sync-protocol
+# Agent Sync Layer (ASL)
 
-A CRDT-based synchronization layer that lets multiple coding agents edit the same repository concurrently without lost writes, plus presence awareness ("who's editing what"). Built in phases against [agent-sync-dev-spec.md](agent-sync-dev-spec.md), which is the source of truth for design decisions — this file is just setup/usage. See [CLAUDE.md](CLAUDE.md) for architecture detail and [CHANGELOG.md](CHANGELOG.md) for what's been built so far.
+**Real-time CRDT synchronization for concurrent AI coding agents. Run Codex and Claude Code in parallel without silently losing overlapping file edits.**
 
-## Requirements
+Agent Sync Layer (`asl`) combines [Yjs](https://yjs.dev/) collaborative editing, Git worktree isolation, durable recovery, and coding-agent hooks. Each agent works in its own Git worktree while accepted text changes converge through a local synchronization daemon and are collected on an integration branch for review.
 
-- Node.js 20.12+ and npm for source development or the private npm package; private standalone builds embed Node.js
-- `git` on `PATH` (Git for Windows on native Windows; required by the managed `asl codex` / `asl claude` workflow and by disk flush)
-- Codex CLI or Claude Code on `PATH`, depending on which agent you launch
-- macFUSE (macOS) / libfuse (Linux) — only if you explicitly install and use the optional FUSE adapter; it is not used by the hook workflow and has no native WinFsp implementation
+Use it when you want multiple coding agents working on the same repository at the same time—with explicit conflict handling instead of last-write-wins file overwrites.
 
-## Install
+> [!NOTE]
+> Agent Sync Layer is an independent project. It is not affiliated with or endorsed by OpenAI or Anthropic.
 
-`agent-sync-layer` is currently a private package and is not published to npm. Repository collaborators can build and install a verified tarball locally:
+## Why Agent Sync Layer?
+
+Running two coding agents in one checkout is unsafe: they can overwrite each other's files, observe half-finished changes, or leave the repository in an inconsistent state. Giving every agent a separate Git worktree prevents direct filesystem collisions, but it does not share in-progress edits.
+
+ASL provides both:
+
+- **Isolated workspaces** — one Git worktree and branch per agent.
+- **Live text synchronization** — Yjs CRDT rooms merge independent changes as they happen.
+- **Conflict rejection** — stale or ambiguous edits fail with an actionable “re-read and retry” error instead of guessing.
+- **Crash recovery** — acknowledged CRDT state is persisted before the write reports success.
+- **Safe integration** — accepted changes flush to an integration branch and reach your original checkout as a staged, uncommitted merge.
+- **Codex and Claude Code support** — managed hook injection through `asl codex` and `asl claude`.
+- **Extensible adapters** — a generic MCP proxy, an SDK, and an experimental FUSE adapter.
+
+## Quick start
+
+### 1. Install
+
+With Node.js 20.12 or newer:
 
 ```bash
-npm ci
-npm run pack:private
-npm install -g ./artifacts/npm/agent-sync-layer-0.1.0.tgz
+npm install --global agent-sync-layer
 ```
 
-The packaging scripts can produce standalone archives for Linux x64, Windows x64, macOS x64, and macOS ARM64 when run on each target. Those builds expose `asl` without requiring Node.js on the destination machine. See [private packaging and installation](docs/private-packaging.md) for local builds, checksum verification, signing limitations, and the temporarily deferred CI workflow.
+Or download the standalone archive for your operating system from [GitHub Releases](https://github.com/alanoconner/agent-sync-protocol/releases/latest). Standalone builds include Node.js; Git and the coding-agent CLI are still required.
 
-For development in this checkout, `npm run build && npm link` exposes both `asl` and `agent-sync`. `fuse-native` is optional, so a missing native FUSE runtime does not prevent installation or hook-based use; FUSE is not included in standalone builds.
+See the [installation guide](docs/installation.md) for macOS, Linux, Windows, checksum verification, upgrades, and source installation.
 
-## Quick start — real coding agents
+### 2. Start an agent
 
-From a clean Git checkout of the project you want the agents to edit:
+Run ASL from a clean Git checkout:
 
 ```bash
 asl codex
-# or
+```
+
+Or:
+
+```bash
 asl claude
 ```
 
-Run the command again in another terminal to add another agent to the same session. ASL automatically creates one integration worktree and a separate worktree/branch per agent, starts a loopback-only Yjs daemon, injects the compiled pre/post hooks, sets the required environment, detects the package-manager install command, and launches the requested CLI in its worktree. The original checkout and branch are not modified.
-
-### Native Windows
-
-The managed hook workflow supports launching `asl` from PowerShell, cmd, or Git Bash. Install Git for Windows and the chosen agent CLI, then install either the private npm tarball (which also needs Node.js 20.12+) or the Windows x64 standalone artifact. Codex receives a native `command_windows` hook command automatically. Claude Code uses Git Bash internally; ASL discovers the standard Git for Windows installation or honors `CLAUDE_CODE_GIT_BASH_PATH` when Git is installed elsewhere.
-
-WSL remains supported as a Linux environment, but is not required for the native hook workflow. The experimental FUSE adapter is unrelated to this support and does not implement WinFsp.
-
-On first use, ASL shows any repository-defined setup or validation command before running it. Codex also asks you to trust the stable hook definition: open `/hooks` when prompted by ASL. This trust step is intentionally left to Codex.
+Run the command again in another terminal to add another synchronized agent:
 
 ```bash
-asl status       # inspect the session, daemon, worktrees, and agents
-asl finish       # flush, validate, and stage an uncommitted merge on the original branch
-asl clean        # remove safe agent worktrees/branches; retain the integration branch
-asl reset        # stop agents and discard the entire managed session
+asl codex --name reviewer
+asl claude --name implementer
 ```
 
-`asl finish` keeps granular flush commits for recovery while agents work, then compacts them into one integration commit and prepares a real `--no-ff --no-commit` merge in the original checkout. Review the staged result, then either commit it or run `git merge --abort`. It refuses to proceed if that checkout is dirty, is no longer on the session's original branch and commit, or has another Git operation in progress. Use `asl stop` instead when you want to flush and pause while retaining all managed worktrees.
+On the first Codex launch, ASL asks you to open `/hooks` and trust its stable project hook definition. Codex does not run untrusted hooks automatically; review the command before approving it. See the official OpenAI documentation for [hook packaging and trust behavior](https://developers.openai.com/plugins/build/plugins#bundled-mcp-servers-and-lifecycle-hooks).
 
-`asl reset` is the destructive start-over command. It terminates the agent processes recorded in the current repository's ASL session, stops the daemon, force-removes all session-owned agent and integration worktrees (including partial allocations left by interrupted initialization), deletes their `asl/...` branches, and removes the repository's state and trust record under `~/.asl`. Stale locks left by an interrupted ASL process are reclaimed automatically. Unmatched and unflushed work in those managed worktrees is intentionally discarded. If `asl finish` left its ASL integration merge pending, reset aborts that merge too; it refuses to touch an unrelated merge. Files and commits already accepted in the original project branch are not removed.
-
-## Core demo — see two clients converge
-
-This proves the core sync loop with no real agent involved: one server, two terminals editing the same "file."
+### 3. Inspect and finish
 
 ```bash
-npm run server
+asl status
+asl finish
 ```
 
-In two other terminals:
+`asl finish` flushes synchronized changes, runs configured validation, stops the daemon, compacts recovery commits, and prepares an uncommitted merge in your original checkout. Review it normally:
 
 ```bash
-npm run demo -- shared.txt alice
-npm run demo -- shared.txt bob
+git status
+git diff --cached
+git commit
 ```
 
-Type a line and press Enter in either terminal — it appears in both. `npm run demo -- <docName> [agentId] [serverUrl]` connects a `SyncClient`, sets presence, and prints the merged content on every change.
+Read [Your first synchronized session](docs/getting-started.md) for the complete walkthrough.
 
-## Running the server
+## How it works
 
-**Config-driven (recommended — Phase 7):**
+```mermaid
+flowchart LR
+  A[Original Git checkout] -->|asl codex / asl claude| B[Integration worktree]
+  B --> C[Agent worktree: Codex]
+  B --> D[Agent worktree: Claude Code]
+  C <-->|pre/post hooks| E[Local Yjs sync daemon]
+  D <-->|pre/post hooks| E
+  E -->|durable CRDT snapshots| F[Recovery state]
+  E -->|validated flush commits| B
+  B -->|asl finish: staged merge| A
+```
+
+Each shared text file is represented by a Yjs document. Before a covered tool operates, the hook refreshes the agent worktree from current shared state. After a write, ASL compares the tool's before/after snapshot with the live document:
+
+- Non-overlapping changes merge.
+- Stale overlapping changes reject.
+- Ambiguous replacements reject.
+- Deletions synchronize through tombstones.
+- Declared exclusive files use a short server-arbitrated lease.
+
+The original checkout is not edited during the session. Git refs and managed worktrees are created, while the integration branch receives granular recovery commits.
+
+## Requirements
+
+- Git on `PATH` with `user.name` and `user.email` configured.
+- A clean, non-bare Git checkout on a branch.
+- Codex CLI or Claude Code on `PATH`, depending on the command you run.
+- Node.js 20.12+ for npm installation; not required for standalone builds.
+- Git for Windows for native Windows use.
+- macFUSE or libfuse only when using the optional experimental FUSE adapter.
+
+## Common commands
+
+| Command | What it does |
+|---|---|
+| `asl codex` | Starts Codex in a new synchronized worktree. |
+| `asl claude` | Starts Claude Code in a new synchronized worktree. |
+| `asl status` | Shows the session, daemon, integration branch, and agents. |
+| `asl stop` | Flushes and pauses while retaining managed worktrees. |
+| `asl finish` | Validates and prepares a staged merge in the original checkout. |
+| `asl clean` | Removes safe agent worktrees but retains the integration branch. |
+| `asl reset` | Destructively discards the managed session and its unmatched work. |
+| `asl dashboard` | Displays active shared files, peers, and exclusive locks. |
+| `asl init` | Creates `.agent-sync.yml` with documented defaults. |
+| `asl recover` | Resolves a disk-versus-CRDT recovery conflict explicitly. |
+
+The [CLI reference](docs/asl-cli.md) documents every option, lifecycle transition, safety check, and recovery command.
+
+## Configuration
+
+Create a project configuration:
 
 ```bash
-npm run cli -- init             # writes .agent-sync.yml with sane defaults
-npm run cli -- server --repo-root .
+asl init
 ```
 
-**Env-var-driven (no config file, kept for backward compatibility):**
-
-```bash
-npm run server                                                    # ws://localhost:4600, no persistence
-PORT=5000 npm run server                                          # different port
-AGENT_SYNC_REPO_ROOT=/path/to/repo npm run server                 # also flush to disk + git-commit every debounce interval
-AGENT_SYNC_FLUSH_DEBOUNCE_MS=1000 AGENT_SYNC_REPO_ROOT=/path/to/repo npm run server   # override the 3000ms default
-AGENT_SYNC_VALIDATE_COMMAND="npm test" AGENT_SYNC_REPO_ROOT=/path/to/repo npm run server   # gate each commit on a command
-AGENT_SYNC_VALIDATE_ON_FAIL=warn_only ...                         # commit anyway on a failing gate, instead of reverting (reject_merge default)
-```
-
-With `AGENT_SYNC_REPO_ROOT` (or `--repo-root`), full Yjs room state is durably snapshotted before a write reports success, independently of the later validation/Git flush. A restart therefore restores acknowledged but unflushed text, tombstones, and validation notices without rebuilding a different CRDT history from disk. Standalone state lives under the repository's Git common directory; managed state lives under `~/.asl`. With no repo root, the server remains memory-only and every room starts empty.
-
-## `.agent-sync.yml`
-
-Written by `agent-sync init`. Every field has a default except `validation`, which is left commented out — it's a shell command that would actually run against your repo on every flush, so it needs an explicit opt-in:
+The generated `.agent-sync.yml` looks like this:
 
 ```yaml
 server: ws://localhost:4600
 
 paths:
-  exclusive: []              # files routed through the lock service instead of pure CRDT merge
+  exclusive: []
   ignore:
     - "node_modules/**"
     - "dist/**"
@@ -112,123 +152,129 @@ flush:
   debounce_ms: 3000
 
 worktrees:
-  auto_install: true          # infer npm/pnpm/yarn/bun install from lockfiles
-  # setup_command: "npm ci"  # explicit override; shown for trust before execution
+  auto_install: true
+  # setup_command: "npm ci"
 
 # validation:
-#   command: "npm run lint && npm run typecheck && npm test"
-#   on_fail: reject_merge   # reject_merge | warn_only
+#   command: "npm run typecheck && npm test"
+#   on_fail: reject_merge
 
 symbol_index:
-  enabled: false   # not implemented yet (Phase 8)
+  enabled: false
   language: typescript
   enforcement: advisory
 ```
 
-## CLI reference
+Important settings:
 
-The complete command, lifecycle, configuration, state-layout, and safety reference is in [docs/asl-cli.md](docs/asl-cli.md). The public commands are summarized here:
+- `paths.exclusive` routes lockfiles, generated schemas, or other unsafe-to-merge files through a short exclusive lease.
+- `paths.ignore` excludes matching files from hook workspace scans.
+- `worktrees.auto_install` detects npm, pnpm, Yarn, or Bun lockfiles and installs dependencies in new managed worktrees.
+- `worktrees.setup_command` overrides automatic setup. ASL displays repository-defined commands and asks for trust before first execution.
+- `validation.command` runs before synchronized disk changes are committed. `reject_merge` restores disk state on failure; `warn_only` commits with a warning.
+- `symbol_index` is reserved for a future phase and is not implemented.
 
-```
-asl codex [options] [-- agent args]   # launch Codex in a managed synchronized worktree
-asl claude [options] [-- agent args]  # launch Claude Code the same way
-  --name <name>                       #   stable agent/worktree name within this session
-  --skip-setup                        #   skip package-manager/setup command
-  --bin <path>                        #   override the agent executable
-  --yes                               #   accept displayed first-use repo commands noninteractively
-asl status [--json]                   # inspect the current repository session
-asl stop                              # flush, stop the daemon, retain worktrees
-asl finish                            # flush, validate, stop, and prepare an uncommitted merge
-asl clean                             # remove safe worktrees; retain the integration branch
-asl reset                             # stop agents and discard all managed session artifacts
-asl recover <path> --use-crdt         # resolve restart drift in favor of durable CRDT state
-asl recover <path> --use-disk         # explicitly discard that room's pending CRDT state
-asl init                              # write .agent-sync.yml (--force to overwrite)
-asl server                            # start the server from .agent-sync.yml
-  --config <path>                     #   config file to read (default ./.agent-sync.yml)
-  --repo-root <path>                  #   directory to flush to (default: current directory)
-asl dashboard                         # live "who's editing what" view, polling GET /status
-  --server <ws-url>                   #   server to watch (default: active session, then config)
-  --interval <ms>                     #   poll interval (default 1000)
+## Session lifecycle
+
+A typical workflow is:
+
+```text
+asl codex / asl claude
+        │
+        ▼
+     active ── asl stop ──► paused
+        │                     │
+        │                     └── asl codex / asl claude ──► active
+        │
+        └── asl finish ──► staged merge in original checkout
 ```
 
-`agent-sync` remains an alias for `asl`. Managed session state lives outside the target repository under `~/.asl` (override with `ASL_STATE_DIR` for testing). ASL refuses to start from a dirty checkout, detached HEAD, or missing Git identity. `clean` refuses to remove an agent worktree if it contains changes that are not present in the integration worktree; `reset` is the explicit destructive alternative when those changes should be discarded.
+Use `asl clean` after finishing when you want to remove safe agent worktrees. Use `asl reset` only when you intentionally want to discard the entire managed session. Reset is destructive and is not an alias for ordinary cleanup.
 
-During development, run any of these straight from source with `npm run cli -- <command> [options]` instead of installing the package.
+## What ASL guarantees
 
-### What the managed launcher added
+- Acknowledged repository-backed writes have a durable CRDT snapshot.
+- Covered text-file changes do not silently overwrite a stale overlapping edit.
+- The sync daemon and control API bind to loopback by default.
+- Validation failures can restore the exact pre-flush disk bytes.
+- Flush commits stage only their literal target path.
+- `asl finish` refuses a dirty, moved, detached, or otherwise unsafe original checkout.
+- `asl clean` refuses to remove worktree changes that do not match integration state.
 
-- Repository-scoped sessions with one integration worktree and one isolated worktree per agent.
-- A detached loopback-only Yjs daemon with authenticated lifecycle control and durable, pre-acknowledgment room recovery.
-- Compiled Codex and Claude Code hooks, injected automatically without copying hook files or exporting variables.
-- Lockfile-based dependency setup plus explicit trust for repository-defined setup and validation commands.
-- Safe pause, compacted integration history, uncommitted final merge, and cleanup commands that preserve the integration branch and refuse known data-loss cases.
+## Current limitations
 
-## Connecting a real agent
+- Hooks synchronize text files up to 1 MB and at most 200 changed files per tool call.
+- Binary files and processes that keep writing after a tool call returns are outside hook coverage.
+- A room hydrates from disk once. External edits made behind the daemon's back are not reconciled until restart.
+- Hook processes are short-lived, so dashboard presence is less continuous than persistent SDK clients.
+- The FUSE adapter is experimental: it has no `readdir`, `mkdir`, or `rename`, and no WinFsp implementation.
+- Phase 8's symbol/dependency index is not implemented.
+- Standalone macOS and Windows binaries are not yet trusted-publisher signed.
 
-Three interception mechanisms exist today, per spec Section 3 — pick based on how your agent reaches files:
+These boundaries are expanded in the [CLI reference](docs/asl-cli.md#safety-checks-and-limitations).
 
-| Agent shape | Mechanism | Where |
-|---|---|---|
-| Exposes file ops as MCP tools | Generic MCP proxy | `src/mcp/` — see `examples/agent-sync-mcp-map.example.yml` |
-| Claude Code CLI | Managed hook bridge | `asl claude` (`src/hooks/`) |
-| Codex CLI/app | Managed hook bridge | `asl codex` (`src/hooks/`) |
-| CLI agent with no hook API and no rebindable registry | Optional FUSE mount | `src/fuse/` (macOS/Linux prototype only; no `readdir`/`mkdir`/`rename`, no WinFsp adapter) |
+## Library and integration APIs
 
-### Manual Claude Code hook setup (advanced)
+The npm package also exposes an ESM SDK:
 
-This is the path that's actually been live-tested end-to-end with real Claude Code CLI agents:
+```ts
+import { SyncFileOps } from "agent-sync-layer";
 
-1. Give each agent its own working directory sharing one git history:
-   ```bash
-   git worktree add ../agent-a-worktree
-   git worktree add ../agent-b-worktree
-   ```
-2. Start the sync server pointed at the canonical checkout (this is what accumulates git commits):
-   ```bash
-   AGENT_SYNC_REPO_ROOT=/path/to/canonical/checkout npm run server
-   ```
-3. In each worktree, create `.claude/settings.json` from [examples/claudeCodeHookSettings.example.json](examples/claudeCodeHookSettings.example.json), filling in the absolute paths to this repo's `node_modules/.bin/tsx` and `examples/claudeCodeHook.ts`.
-4. Run `claude` normally in each worktree — it keeps calling `Read`/`Edit`/`Write`/`Bash` exactly as usual; the hooks pull fresh shared content before each call and push the result after.
-5. Watch it: `npm run cli -- dashboard` shows which files have active rooms. A room's `peers` list will usually show `(nobody)` — each hook invocation is a short-lived process, not a persistent connection, so presence is necessarily spotty. That's expected, not a bug; it doesn't mean the sync isn't working.
+const files = new SyncFileOps({ serverUrl: "ws://localhost:4600" });
 
-The hook reads the worktree's own `.agent-sync.yml` for `server` and `paths.exclusive` (hot files routed through the lock service instead of CRDT merge alone). `AGENT_SYNC_SERVER` and `AGENT_SYNC_EXCLUSIVE_PATHS` (comma-separated relative paths), set as env vars in the hook command, override those two fields if you'd rather not keep a config file in the worktree.
+const before = await files.readFile("src/example.ts");
+await files.writeFileFromSnapshot(
+  "src/example.ts",
+  before,
+  before.replace("oldValue", "newValue"),
+);
 
-Edit/Write/Bash hook payloads must include matching `session_id` and `tool_use_id` values in the pre/post pair. Snapshots are isolated by workspace, session, tool call, and file path. Read hooks refresh disk without creating a snapshot. A missing snapshot is a blocking hook failure instead of being treated as an empty file.
+await files.close();
+```
 
-Each flush commits only its target path, leaving unrelated staged changes staged. If validation rejects a flush, the service restores the exact pre-flush disk contents (including uncommitted changes), or removes the file only if it was absent before the flush. Failed Git operations leave the content eligible for retry through `flushPath()` or `flushAll()`.
+Published entry points:
 
-**The server must be started with a repo root** (step 2 above, or `agent-sync server --repo-root`). That's what hydrates a brand-new room from the working tree the first time any agent touches an existing file; against a server with no repo root, every room starts empty and the hook would overwrite an existing local file with that emptiness.
+- `agent-sync-layer` — `SyncClient`, `SyncFileOps`, and synchronization errors.
+- `agent-sync-layer/config` — `.agent-sync.yml` parsing and defaults.
+- `agent-sync-layer/server` — server/runtime construction.
+- `agent-sync-layer/mcp` — generic MCP filesystem-tool proxy.
+- `agent-sync-layer/fuse` — experimental FUSE operations and mount adapter.
 
-**Known limitations of this bridge** (see [CLAUDE.md](CLAUDE.md) for detail):
-- A rejected `Edit`/`Write` (concurrent edit, lock held, failed validation) reverts the local file and surfaces the error to the agent — expected behavior, not a failure.
-- A `Bash` call is covered by diffing the workspace before and after it (git-tracked plus untracked-but-not-ignored files, minus `paths.ignore`), so it works however the command changes a text file — `sed`, a script, a formatter, or deletion. Binary or >1 MB files and changes made by a process that keeps running after the command returns remain outside hook coverage.
-- A room is hydrated from the server's repo root once, when it's first created. A file changed on disk behind the server's back after that (a manual `git pull` in the canonical checkout, say) is not picked up until the server restarts — the room is the source of truth once it exists.
+For adapter design and protocol details, see [CLAUDE.md](CLAUDE.md) and [agent-sync-dev-spec.md](agent-sync-dev-spec.md).
 
-### Manual Codex hook setup (advanced)
-
-The Codex adapter uses the same worktree and server layout as the Claude Code bridge above. Its wildcard `PreToolUse` hook refreshes active shared rooms before every supported local tool, while `apply_patch` and `Bash` additionally use post-tool workspace diffing to publish writes:
-
-1. In the canonical (main) checkout, copy [examples/codexHookSettings.example.json](examples/codexHookSettings.example.json) to `.codex/hooks.json` and replace the two absolute paths. Codex resolves project hooks for linked Git worktrees from this main worktree, so a copy that exists only inside a linked worktree is not loaded.
-2. Start the server with the canonical checkout as its repo root.
-3. Start Codex in each linked worktree, open `/hooks`, and trust the canonical project hook definition.
-4. Use Codex normally. Before each supported local tool call, the hook pulls active rooms so shell, MCP, and other local reads see current shared files. Before `apply_patch` or a shell call it also snapshots the worktree; afterward it pushes changed, new, and deleted text files through exact-match-or-reject synchronization.
-
-The adapter reads `.agent-sync.yml` and honors the same `AGENT_SYNC_SERVER` and `AGENT_SYNC_EXCLUSIVE_PATHS` overrides as the Claude bridge. Codex `apply_patch` and shell-command deletions create synchronized tombstones: stale deletions reject and restore current content, while a writer that has observed the tombstone may recreate the path. A status lookup or sync failure blocks the tool with actionable stderr instead of silently proceeding against stale disk. Binary files, files over 1 MB, changes from processes that outlive the command, and calls on specialized tool paths that bypass Codex hooks are not synchronized. Hook configuration under `.codex/` is always excluded from workspace scanning.
-
-## Testing this project itself
+## Development
 
 ```bash
-npm test                                            # run the full suite once
-npx vitest                                          # watch mode
-npx vitest run test/convergence.test.ts             # a single test file
-npx vitest run -t "converges to the same state"     # a single test by name
-npm run build                                       # type-check + emit to dist/
-npx tsc --noEmit -p .                               # type-check only
+npm ci
+npm run typecheck
+npm run typecheck:examples
+npm test
+npm run build
 ```
 
-See CLAUDE.md's Tests section for what each `test/*.test.ts` file covers.
+Useful focused commands:
+
+```bash
+npx vitest run test/convergence.test.ts
+npm run cli -- status
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for repository layout, test expectations, and pull-request guidance.
+
+## Documentation
+
+- [Installation](docs/installation.md)
+- [Your first synchronized session](docs/getting-started.md)
+- [Complete CLI reference](docs/asl-cli.md)
+- [Maintainer release guide](docs/distribution.md)
+- [Development specification](agent-sync-dev-spec.md)
+- [Implementation history](CHANGELOG.md)
+- [Security policy](SECURITY.md)
 
 ## Project status
 
-Phases 1–7 of the spec's build order are implemented and tested. Phase 8 (symbol index) has not started. Phase 9 now has the managed launcher, native Windows hook support, a private installable npm/SDK tarball, and native standalone builds for Linux x64, Windows x64, macOS x64, and macOS ARM64. The GitHub Actions workflow is temporarily deferred because the repository token cannot update workflow files. Public package publication, permanent releases, trusted code signing, and platform package-manager manifests are intentionally deferred. See [CHANGELOG.md](CHANGELOG.md) for a phase-by-phase history and [agent-sync-dev-spec.md](agent-sync-dev-spec.md) Section 10 for the full phase list.
+Phases 1–7 of the development specification are implemented: CRDT sync, multi-file presence, transparent interception, disk/Git persistence, validation, exclusive locks, configuration, and managed agent sessions. Phase 8, the optional symbol/dependency index, has not started. Packaging exists for npm plus Linux x64, Windows x64, macOS x64, and macOS ARM64 standalone executables.
+
+## License
+
+See [LICENSE](LICENSE).

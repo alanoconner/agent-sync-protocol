@@ -1,0 +1,46 @@
+name: Feature request
+description: Propose a focused Agent Sync Layer improvement
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What concurrent-agent workflow is difficult or unsafe today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the user-visible result rather than only an implementation.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Managed CLI and worktrees
+        - Codex hooks
+        - Claude Code hooks
+        - CRDT synchronization
+        - Persistence and recovery
+        - MCP adapter
+        - FUSE adapter
+        - Packaging and installation
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: risks
+    attributes:
+      label: Safety or compatibility considerations
+      description: Note possible data-loss, concurrency, platform, or backward-compatibility implications.
