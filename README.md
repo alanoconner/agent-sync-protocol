@@ -6,12 +6,9 @@ Agent Sync Layer (`asl`) combines [Yjs](https://yjs.dev/) collaborative editing,
 
 Use it when you want multiple coding agents working on the same repository at the same time—with explicit conflict handling instead of last-write-wins file overwrites.
 
-> [!NOTE]
-> Agent Sync Layer is an independent project. It is not affiliated with or endorsed by OpenAI or Anthropic.
-
 ## Why Agent Sync Layer?
 
-Running two coding agents in one checkout is unsafe: they can overwrite each other's files, observe half-finished changes, or leave the repository in an inconsistent state. Giving every agent a separate Git worktree prevents direct filesystem collisions, but it does not share in-progress edits.
+Running multiple coding agents in one checkout is unsafe: they can overwrite each other's files, observe half-finished changes, or leave the repository in an inconsistent state. Giving every agent a separate Git worktree prevents direct filesystem collisions, but it does not share in-progress edits.
 
 ASL provides both:
 
@@ -23,7 +20,11 @@ ASL provides both:
 - **Codex and Claude Code support** — managed hook injection through `asl codex` and `asl claude`.
 - **Extensible adapters** — a generic MCP proxy, an SDK, and an experimental FUSE adapter.
 
+
+
 ## Quick start
+
+
 
 ### 1. Install
 
@@ -91,6 +92,8 @@ flowchart LR
   B -->|asl finish: staged merge| A
 ```
 
+
+
 Each shared text file is represented by a Yjs document. Before a covered tool operates, the hook refreshes the agent worktree from current shared state. After a write, ASL compares the tool's before/after snapshot with the live document:
 
 - Non-overlapping changes merge.
@@ -110,20 +113,24 @@ The original checkout is not edited during the session. Git refs and managed wor
 - Git for Windows for native Windows use.
 - macFUSE or libfuse only when using the optional experimental FUSE adapter.
 
+
+
 ## Common commands
 
-| Command | What it does |
-|---|---|
-| `asl codex` | Starts Codex in a new synchronized worktree. |
-| `asl claude` | Starts Claude Code in a new synchronized worktree. |
-| `asl status` | Shows the session, daemon, integration branch, and agents. |
-| `asl stop` | Flushes and pauses while retaining managed worktrees. |
-| `asl finish` | Validates and prepares a staged merge in the original checkout. |
-| `asl clean` | Removes safe agent worktrees but retains the integration branch. |
-| `asl reset` | Destructively discards the managed session and its unmatched work. |
-| `asl dashboard` | Displays active shared files, peers, and exclusive locks. |
-| `asl init` | Creates `.agent-sync.yml` with documented defaults. |
-| `asl recover` | Resolves a disk-versus-CRDT recovery conflict explicitly. |
+
+| Command         | What it does                                                       |
+| --------------- | ------------------------------------------------------------------ |
+| `asl codex`     | Starts Codex in a new synchronized worktree.                       |
+| `asl claude`    | Starts Claude Code in a new synchronized worktree.                 |
+| `asl status`    | Shows the session, daemon, integration branch, and agents.         |
+| `asl stop`      | Flushes and pauses while retaining managed worktrees.              |
+| `asl finish`    | Validates and prepares a staged merge in the original checkout.    |
+| `asl clean`     | Removes safe agent worktrees but retains the integration branch.   |
+| `asl reset`     | Destructively discards the managed session and its unmatched work. |
+| `asl dashboard` | Displays active shared files, peers, and exclusive locks.          |
+| `asl init`      | Creates `.agent-sync.yml` with documented defaults.                |
+| `asl recover`   | Resolves a disk-versus-CRDT recovery conflict explicitly.          |
+
 
 The [CLI reference](docs/asl-cli.md) documents every option, lifecycle transition, safety check, and recovery command.
 
@@ -174,6 +181,8 @@ Important settings:
 - `validation.command` runs before synchronized disk changes are committed. `reject_merge` restores disk state on failure; `warn_only` commits with a warning.
 - `symbol_index` is reserved for a future phase and is not implemented.
 
+
+
 ## Session lifecycle
 
 A typical workflow is:
@@ -200,6 +209,8 @@ Use `asl clean` after finishing when you want to remove safe agent worktrees. Us
 - Flush commits stage only their literal target path.
 - `asl finish` refuses a dirty, moved, detached, or otherwise unsafe original checkout.
 - `asl clean` refuses to remove worktree changes that do not match integration state.
+
+
 
 ## Current limitations
 
@@ -270,6 +281,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for repository layout, test expectations,
 - [Development specification](agent-sync-dev-spec.md)
 - [Implementation history](CHANGELOG.md)
 - [Security policy](SECURITY.md)
+
+
 
 ## Project status
 

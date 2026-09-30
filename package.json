@@ -2,7 +2,8 @@
   "name": "agent-sync-layer",
   "version": "0.1.0",
   "description": "CRDT synchronization and Git worktree orchestration for concurrent AI coding agents, including Codex and Claude Code.",
-  "private": true,
+  "private": false,
+  "license": "MIT",
   "homepage": "https://github.com/alanoconner/agent-sync-protocol#readme",
   "bugs": {
     "url": "https://github.com/alanoconner/agent-sync-protocol/issues"
@@ -10,6 +11,10 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/alanoconner/agent-sync-protocol.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "keywords": [
     "ai-agents",
@@ -74,7 +79,10 @@
     "build:binary": "node scripts/build-sea.mjs",
     "pack:package": "node scripts/pack-package.mjs",
     "smoke:binary": "node scripts/smoke-binary.mjs",
+    "check:release": "node scripts/check-release.mjs",
+    "release:check": "npm run check:release && npm run typecheck && npm run typecheck:examples && npm test && npm run verify:package && npm audit --omit=dev",
     "verify:package": "node scripts/verify-package.mjs",
+    "prepublishOnly": "npm run release:check",
     "prepack": "npm run clean && npm run build",
     "server": "tsx src/server/index.ts",
     "cli": "tsx src/cli/index.ts",
@@ -105,6 +113,6 @@
     "postject": "^1.0.0-alpha.6",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^4.1.11"
   }
 }

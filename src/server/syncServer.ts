@@ -306,12 +306,16 @@ export class SyncServer extends Observable<string> {
     }
 
     ws.on("message", (data: RawData) => {
-      if (room.persistenceError) {
+      const decoder = decoding.createDecoder(toUint8Array(data));
+      const outerType = decoding.readVarUint(decoder);
+
+      // A failed save may settle between the update and the following
+      // durability barrier. Let that barrier through so the client receives
+      // the stored error immediately instead of waiting for its timeout.
+      if (room.persistenceError && outerType !== MESSAGE_DURABILITY) {
         ws.close(1011, "Durable CRDT storage for this room is unavailable");
         return;
       }
-      const decoder = decoding.createDecoder(toUint8Array(data));
-      const outerType = decoding.readVarUint(decoder);
 
       if (outerType === MESSAGE_SYNC) {
         const encoder = encoding.createEncoder();

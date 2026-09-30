@@ -26,15 +26,13 @@ The npm package exposes the `asl` and `agent-sync` binaries plus five ESM entry 
 
 ```bash
 npm ci
-npm run typecheck
-npm run typecheck:examples
-npm test
-npm run build
-npm run verify:package
+npm run release:check
 npm publish --dry-run
 ```
 
-Inspect `npm publish --dry-run` output for secrets, source files, tests, local configuration, or generated artifacts that should not ship.
+`release:check` validates the package metadata and release tag, type-checks the library and examples, runs the test suite, builds and tests an isolated package consumer, and audits production dependencies. `npm publish` and `npm publish --dry-run` run the same checks automatically through `prepublishOnly`.
+
+Inspect the dry-run output for secrets, source files, tests, local configuration, or generated artifacts that should not ship.
 
 ## Verify the npm package
 
@@ -117,24 +115,50 @@ gh release edit vX.Y.Z --draft=false
 
 Do not move a published version tag or silently replace release assets. Publish a new patch version for corrections.
 
-## Publish to npm
+## First npm publication
 
-For an interactive first publication:
+The trusted-publishing workflow cannot publish a package that does not exist on npm yet. Publish the first version interactively from the release commit:
 
 ```bash
 npm login
 npm whoami
+ASL_RELEASE_TAG=v0.1.0 npm run release:check
 npm publish --access public
 ```
 
-After publication, test from a directory outside the repository:
+Replace `v0.1.0` with `vX.Y.Z` for the version in `package.json`. npm package names are first-come, first-served, so confirm the name immediately before publication:
+
+```bash
+npm view agent-sync-layer
+```
+
+The `publishConfig` in `package.json` restricts publication to the public npm registry and public access. Never publish with `--force`, and do not reuse a released version number.
+
+After the first publication, test from a directory outside the repository:
 
 ```bash
 npm install --global agent-sync-layer@X.Y.Z
-asl
+asl --help
 ```
 
-For automated releases, prefer npm trusted publishing with a GitHub-hosted runner and OIDC instead of a long-lived write token. Restrict the workflow to version tags or published GitHub Releases, grant only `contents: read` and `id-token: write`, and ensure the npm trusted-publisher configuration exactly matches the repository and workflow filename.
+## Configure trusted publishing
+
+After the package exists, open its settings on npm and add a GitHub Actions trusted publisher with these exact values:
+
+| npm setting | Value |
+| --- | --- |
+| Organization or user | `alanoconner` |
+| Repository | `agent-sync-protocol` |
+| Workflow filename | `publish-npm.yml` |
+| Environment | `npm` |
+
+Then create a GitHub environment named `npm`. Optional environment protection rules, such as required reviewers, provide a manual approval gate before publication.
+
+The workflow at `.github/workflows/publish-npm.yml` runs when a GitHub Release is published. It checks out that release's tag, uses a GitHub-hosted runner with Node.js 24 and npm 11.5 or newer, requests only `contents: read` and `id-token: write`, reruns the full release checks, and publishes with a short-lived OIDC credential. It does not store an npm token.
+
+The npm trusted-publisher settings must match the repository, workflow filename, and environment exactly. The package version must also match the GitHub Release tag (`1.2.3` and `v1.2.3`, respectively), or the release check fails before publication.
+
+Trusted publishing works from a private GitHub repository, but npm cannot generate provenance attestations for private source repositories. Make the repository public before publishing if public provenance is a release requirement.
 
 ## CI release matrix
 
@@ -161,5 +185,6 @@ Recommended flow:
 - Install the package in a clean environment and run `asl`.
 - Download and checksum each GitHub Release asset.
 - Confirm README links resolve from both GitHub and the npm package page.
+- Confirm the npm version displays trusted-publisher provenance when the repository is public.
 - Confirm the GitHub Release is marked latest when appropriate.
 - Create an issue or follow-up release for any signing or platform gap discovered after publication.

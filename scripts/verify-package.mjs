@@ -10,9 +10,18 @@ const temporary = mkdtempSync(join(tmpdir(), "asl-package-"));
 const packDir = join(temporary, "pack");
 const consumer = join(temporary, "consumer");
 const npmEnv = { ...process.env, npm_config_cache: join(temporary, "npm-cache") };
+// An outer `npm publish --dry-run` exports this setting to lifecycle scripts.
+// The verifier must still create and install its disposable local tarball.
+for (const key of Object.keys(npmEnv)) {
+  if (key.toLowerCase().replaceAll("-", "_") === "npm_config_dry_run") delete npmEnv[key];
+}
+npmEnv.npm_config_dry_run = "false";
 const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 if (packageJson.name !== "agent-sync-layer") throw new Error(`unexpected package name: ${packageJson.name}`);
-if (packageJson.private !== true) throw new Error("package.json must remain private until publication is explicitly enabled");
+if (packageJson.private === true) throw new Error("package.json is marked private and cannot be published");
+if (packageJson.license !== "MIT") throw new Error(`unexpected package license: ${packageJson.license}`);
+if (packageJson.publishConfig?.registry !== "https://registry.npmjs.org/") throw new Error("package.json must publish only to the public npm registry");
+if (packageJson.publishConfig?.access !== "public") throw new Error("package.json publish access must be public");
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: "utf8", ...options });

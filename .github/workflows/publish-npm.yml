@@ -1,0 +1,42 @@
+name: Publish npm package
+
+on:
+  release:
+    types:
+      - published
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Verify and publish
+    if: github.repository == 'alanoconner/agent-sync-protocol'
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up Node.js and npm registry
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Install a trusted-publishing-compatible npm CLI
+        run: npm install --global "npm@^11.5.1"
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Publish public package
+        run: npm publish
